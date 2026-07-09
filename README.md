@@ -1,5 +1,7 @@
 # SafeLoop
 
+**Paper:** SafeLoop: Risk-Aware Rollback for Vision-Language-Action Manipulation
+
 SafeLoop is an outer-loop safety controller for frozen robotic manipulation policies. It monitors a base policy, records safe anchors, predicts short-horizon hazards, and can roll back to a safe anchor before handing control back to the base policy.
 
 The repository focuses on three reproducible components:
@@ -9,6 +11,16 @@ The repository focuses on three reproducible components:
 - Train a three-action decision head for `noop`, `record`, and `rollback`.
 
 Large artifacts such as model weights, rollout images, videos, checkpoints, and raw logs are intentionally excluded from the repository.
+
+## Demo: Avoiding A Stuck Failure With Rollback
+
+The video below shows the same task and base policy with and without SafeLoop.
+
+<video src="assets/demo/pi0_vs_safeloop_task09_seed214_ep0_labeled_red_green_boxes.mp4" controls width="100%"></video>
+
+[Open the demo video](assets/demo/pi0_vs_safeloop_task09_seed214_ep0_labeled_red_green_boxes.mp4)
+
+Left: the original pi0 policy enters a stuck state during execution. Right: the same policy is wrapped with SafeLoop. SafeLoop detects the risky trajectory, rolls back to a recorded safe waypoint, and then allows the policy to replan a successful path to finish the task. The colored overlays are kept in the video to make the safety event and recovery behavior easy to inspect.
 
 ## Repository Layout
 
@@ -174,7 +186,7 @@ Keep these outside Git:
 - base model weights
 - trained checkpoints
 - raw rollout images
-- videos
+- raw or large videos, except compact public demos under `assets/demo/`
 - detailed traces and logs
 - large JSONL datasets
 

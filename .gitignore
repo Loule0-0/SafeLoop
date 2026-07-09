@@ -42,10 +42,14 @@ datasets/
 *.png
 *.jpg
 *.jpeg
+!assets/
+!assets/demo/
+!assets/demo/*.mp4
 
 # Generated rollout assets
 rollout_assets/
 videos/
+release_artifacts/
 trace.jsonl
 qwen_rollout.jsonl
 decision_debug.jsonl
@@ -62,4 +66,3 @@ bad_pi0_images.txt
 full_trajectory_pi0
 ouput_data_pi0*.jsonl
 output_data_pi0*.jsonl
-release_artifacts/

@@ -1,5 +1,7 @@
 # SafeLoop Model Card
 
+Paper: SafeLoop: Risk-Aware Rollback for Vision-Language-Action Manipulation
+
 ## Overview
 
 SafeLoop is an outer-loop safety controller for robotic manipulation research. It wraps a frozen base policy with a short-horizon hazard predictor, safe-anchor memory, motion-planning rollback, and a three-action decision head.
