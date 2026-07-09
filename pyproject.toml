@@ -1,0 +1,9 @@
+[project]
+name = "safeloop"
+version = "0.1.0"
+description = "SafeLoop safety wrapper for robotic manipulation policies."
+requires-python = ">=3.8"
+dependencies = ["numpy"]
+
+[tool.setuptools.packages.find]
+include = ["safety_guard*"]

@@ -1,0 +1,65 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environments
+.venv/
+venv/
+.env
+.env.*
+
+# Experiment outputs and logs
+outputs/
+online_rollout/
+logs/
+runs/
+wandb/
+*.log
+MUJOCO_LOG.TXT
+
+# Large model and dataset artifacts
+checkpoints/
+models/
+model/
+data/
+datasets/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+*.npz
+*.npy
+*.mp4
+*.avi
+*.mov
+*.png
+*.jpg
+*.jpeg
+
+# Generated rollout assets
+rollout_assets/
+videos/
+trace.jsonl
+qwen_rollout.jsonl
+decision_debug.jsonl
+summary.json
+
+# Local notes and generated files
+private_notes/
+local_backups/
+.DS_Store
+Thumbs.db
+
+# Legacy local collection artifacts
+bad_pi0_images.txt
+full_trajectory_pi0
+ouput_data_pi0*.jsonl
+output_data_pi0*.jsonl
+release_artifacts/
