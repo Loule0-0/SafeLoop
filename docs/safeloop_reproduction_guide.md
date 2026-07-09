@@ -142,3 +142,5 @@ python scripts/aggregate_closed_loop_results.py \
 ```
 
 Commit only compact tables or summaries that are intended for public release. Keep detailed logs and videos as external artifacts.
+
+For paper tables, hazard counts should be reviewed from videos or trajectories. Automatic simulation signals are provided for data collection and debugging, not as the default source of released safety metrics.

@@ -41,14 +41,27 @@ def _append_arg(command: list[str], key: str, value: Any) -> None:
     command.extend([flag, str(value)])
 
 
-def _entry_name(entry: dict[str, Any]) -> str:
+def _entry_name(entry: dict[str, Any], seed: int) -> str:
     tasks = "_".join(str(task_id) for task_id in entry["task_ids"])
-    return f"{entry['benchmark']}_tasks_{tasks}_seed{entry['seed']}_{entry['mode']}"
+    return f"{entry['benchmark']}_tasks_{tasks}_seed{seed}_{entry['mode']}"
+
+
+def _entry_seeds(config: dict[str, Any], profile: dict[str, Any], entry: dict[str, Any]) -> list[int]:
+    if "seeds" in entry:
+        values = entry["seeds"]
+    elif "seeds" in profile:
+        values = profile["seeds"]
+    elif "seed_list" in config:
+        values = config["seed_list"]
+    else:
+        values = [entry.get("seed", 0)]
+    return [int(seed) for seed in values]
 
 
 def _build_command(
     config: dict[str, Any],
     entry: dict[str, Any],
+    seed: int,
     context: dict[str, str],
     output_root: Path,
 ) -> list[str]:
@@ -58,9 +71,9 @@ def _build_command(
     args.update({
         "benchmark": entry["benchmark"],
         "task-ids": entry["task_ids"],
-        "seed": entry["seed"],
+        "seed": seed,
         "mode": entry["mode"],
-        "output-dir": str(output_root / _entry_name(entry)),
+        "output-dir": str(output_root / _entry_name(entry, seed)),
     })
     if entry["mode"] == "rl":
         checkpoints = config["checkpoints"]
@@ -81,7 +94,7 @@ def _build_command(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--profile", default="paper_24task_release")
+    parser.add_argument("--profile", default="safeloop_all")
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--weights-dir", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
@@ -112,11 +125,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.checkpoint_dir:
         env["PI0_CHECKPOINT_DIR"] = str(args.checkpoint_dir)
 
-    for entry in profiles[args.profile]["entries"]:
-        command = _build_command(config, entry, context, args.output_root)
-        print(" ".join(command))
-        if not args.dry_run:
-            subprocess.check_call(command, cwd=PROJECT_ROOT, env=env)
+    profile = profiles[args.profile]
+    for entry in profile["entries"]:
+        for seed in _entry_seeds(config, profile, entry):
+            command = _build_command(config, entry, seed, context, args.output_root)
+            print(" ".join(command))
+            if not args.dry_run:
+                subprocess.check_call(command, cwd=PROJECT_ROOT, env=env)
     return 0
 
 

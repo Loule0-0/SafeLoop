@@ -19,6 +19,7 @@ from safety_guard import RuleBasedDecider, SafeLoopController
 from safety_guard.decider import Intervention
 from safety_guard.libero_motion import MotionPlanningRollbackExecutor
 from safety_guard.libero_oracle import LiberoHazardOracle
+from safety_guard.online_rl import OnlineStepSignals
 from safety_guard.predictors import ActionNormRiskPredictor, ConstantRiskPredictor
 from safety_guard.qwen_multitask import (
     QWEN_IMAGE_TOKEN,
@@ -100,6 +101,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--replan-steps", type=int, default=5)
     parser.add_argument("--mode", choices=["baseline", "teacher", "rl"], default="baseline")
     parser.add_argument("--disable-safeloop", action="store_true")
+    parser.add_argument(
+        "--manual-hazard-labels",
+        action="store_true",
+        help="Skip automatic hazard counting in evaluation summaries; paper safety metrics should be filled by manual review.",
+    )
     parser.add_argument("--predictor", choices=["constant", "action-norm", "qwen-multitask"], default="action-norm")
     parser.add_argument("--constant-risk", nargs=4, type=float, default=[0.0, 1.0, 0.0, 1.0])
     parser.add_argument("--qwen-model-dir", "--qwen-model-path", dest="qwen_model_dir", type=Path, default=env_path("QWEN_MODEL"))
@@ -278,7 +284,8 @@ def run_episode(env, task, init_states, policy, args: argparse.Namespace, episod
     env.reset()
     init_index = (args.init_state_start + episode_index) % len(init_states)
     obs = env.set_init_state(init_states[init_index])
-    oracle = LiberoHazardOracle(env.sim)
+    use_hazard_oracle = (not args.manual_hazard_labels) or args.qwen_rollout_jsonl_out is not None
+    oracle = LiberoHazardOracle(env.sim) if use_hazard_oracle else None
     action_plan: collections.deque[np.ndarray] = collections.deque()
     frames: list[np.ndarray] = []
     interventions = {"noop": 0, "record": 0, "rollback": 0}
@@ -346,7 +353,11 @@ def run_episode(env, task, init_states, policy, args: argparse.Namespace, episod
                 raise RuntimeError(f"policy returned {len(action_chunk)} actions, need {args.replan_steps}")
             action_plan.extend(np.asarray(action_chunk[: args.replan_steps]))
         action = action_plan.popleft()
-        pre_action_signals = oracle.read(success=False, task_reward=0.0)
+        pre_action_signals = (
+            oracle.read(success=False, task_reward=0.0)
+            if oracle is not None
+            else OnlineStepSignals(success=False, task_reward=0.0)
+        )
         qwen_hazard_timeline.append(pre_action_signals)
         if args.qwen_rollout_jsonl_out is not None:
             qwen_frame_history.append(live_observation_to_frame(obs))
@@ -401,7 +412,11 @@ def run_episode(env, task, init_states, policy, args: argparse.Namespace, episod
                 nominal_after_rollback += 1
 
         success = bool(env.check_success())
-        signals = oracle.read(success=success, task_reward=float(reward))
+        signals = (
+            oracle.read(success=success, task_reward=float(reward))
+            if oracle is not None
+            else OnlineStepSignals(success=success, task_reward=float(reward))
+        )
         hazard_steps["body"] += int(signals.body_hazard)
         hazard_steps["object"] += int(signals.object_hazard)
         hazard_steps["stuck"] += int(signals.stuck_hazard)
@@ -435,7 +450,7 @@ def run_episode(env, task, init_states, policy, args: argparse.Namespace, episod
                     "hazard_event": bool(signals.hazard_event),
                     "eef_speed": float(signals.eef_speed),
                     "arm_contact_count": int(signals.arm_contact_count),
-                    "object_hazard_reasons": oracle.last_object_hazard_reasons(),
+                    "object_hazard_reasons": oracle.last_object_hazard_reasons() if oracle is not None else [],
                     "memory_size": int(len(controller.memory)) if controller is not None else 0,
                     "rollback_planned_total": int(rollback_planned),
                     "rollback_failed_total": int(rollback_failed),
@@ -492,6 +507,7 @@ def run_episode(env, task, init_states, policy, args: argparse.Namespace, episod
         "effective_control_steps": int(total_steps + rollback_rendered_frames),
         "hazard_steps": hazard_steps,
         "hazard_events": hazard_events,
+        "hazard_label_source": "libero_oracle" if oracle is not None else "manual_review_required",
         "events_per_1k": float(1000.0 * hazard_events["any"] / max(total_steps, 1)),
         "interventions": interventions,
         "rollback_planned": int(rollback_planned),
@@ -629,6 +645,7 @@ def summarize(reports: list[dict]) -> dict:
         for item in reports
     ]
     effective_control_steps = int(sum(per_episode_effective_steps))
+    hazard_label_sources = sorted({str(item.get("hazard_label_source", "unknown")) for item in reports})
     return {
         "episodes": len(reports),
         "success_rate": float(np.mean([bool(item["success"]) for item in reports])) if reports else 0.0,
@@ -641,6 +658,8 @@ def summarize(reports: list[dict]) -> dict:
         "effective_control_steps": effective_control_steps,
         "hazard_events": aggregate_events,
         "hazard_steps": aggregate_steps,
+        "hazard_label_source": hazard_label_sources[0] if len(hazard_label_sources) == 1 else hazard_label_sources,
+        "manual_hazard_review_required": "manual_review_required" in hazard_label_sources,
         "events_per_1k": float(1000.0 * aggregate_events["any"] / max(steps, 1)),
         "body_event_rate": float(aggregate_events["body"] / max(len(reports), 1)),
         "object_event_rate": float(aggregate_events["object"] / max(len(reports), 1)),

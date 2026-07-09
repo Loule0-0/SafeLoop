@@ -35,7 +35,7 @@ safety_guard/
   controller.py                 SafeLoop controller and rollback interface
   memory.py                     safe-anchor memory
   libero_motion.py              LIBERO rollback motion planning
-  libero_oracle.py              simulation hazard oracle
+  libero_oracle.py              optional simulation signals for data/debug
   qwen_multitask.py             multitask predictor dataset, head, loss, inference
   rl_policy_decider.py          three-action decision policy wrapper
   online_rl.py                  online policy optimization utilities
@@ -223,11 +223,10 @@ python scripts/run_release_decider_training.py \
 
 ## 24-Task Evaluation
 
-Run the fixed 24-task release matrix:
+Run the default 24-task SafeLoop evaluation matrix. This expands to 24 tasks x 16 seeds, matching the paper protocol.
 
 ```bash
 python scripts/run_release_24task_eval.py \
-  --profile paper_24task_release \
   --model-dir "$QWEN_MODEL" \
   --weights-dir "$SAFELOOP_WEIGHTS" \
   --output-root "$SAFELOOP_OUTPUT/eval_24task" \
@@ -236,7 +235,9 @@ python scripts/run_release_24task_eval.py \
   --checkpoint-dir "$PI0_CHECKPOINT_DIR"
 ```
 
-The task list is stored in `configs/release/v56_24task_eval.json` and contains the 24 tasks used by the paper release.
+The task list and seed list are stored in `configs/release/v56_24task_eval.json`. The default profile is `safeloop_all`; the baseline-only comparison is available as `--profile pi0_baseline_reference`.
+
+Paper hazard metrics should be filled from manual video or trajectory review. The release runner therefore enables `--manual-hazard-labels` by default and marks automatic hazard fields as requiring review.
 
 ## Artifact Policy
 

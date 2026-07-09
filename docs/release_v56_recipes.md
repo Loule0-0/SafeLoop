@@ -70,11 +70,10 @@ The 24-task suite is defined in `configs/release/v56_24task_eval.json`:
 - LIBERO_SPATIAL: `0, 2, 4, 6`
 - LIBERO_90: `0, 28, 30, 32, 37, 71, 84`
 
-Run the fixed release matrix:
+Run the default SafeLoop release matrix. This expands to 24 tasks x 16 seeds, for 384 rollouts.
 
 ```bash
 python scripts/run_release_24task_eval.py \
-  --profile paper_24task_release \
   --model-dir $QWEN_MODEL \
   --weights-dir $SAFELOOP_WEIGHTS \
   --output-root $SAFELOOP_OUTPUT/eval_24task \
@@ -85,4 +84,6 @@ python scripts/run_release_24task_eval.py \
   --policy-port 8000
 ```
 
-For an all-SafeLoop run on the same 24 tasks, use `--profile safeloop_all`.
+The default profile is `safeloop_all`. The base-policy comparison uses `--profile pi0_baseline_reference`.
+
+Paper hazard metrics are intended to be filled from manual video or trajectory review. The release profile enables `--manual-hazard-labels`, so automatic hazard counters in the JSON summaries are placeholders and should not be reported as paper safety numbers.
