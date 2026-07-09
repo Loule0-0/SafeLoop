@@ -1,0 +1,282 @@
+{
+  "release": "v56_24task_release",
+  "paper": "SafeLoop: Risk-Aware Rollback for Vision-Language-Action Manipulation",
+  "huggingface": {
+    "weights_repo": "Jaqen0-0/SafeLoop",
+    "dataset_repo": "Jaqen0-0/SafeLoop-Training-Data"
+  },
+  "task_suite": {
+    "libero_object": [
+      3,
+      9
+    ],
+    "libero_goal": [
+      0,
+      3,
+      5,
+      6,
+      9
+    ],
+    "libero_10": [
+      0,
+      3,
+      4,
+      6,
+      7,
+      9
+    ],
+    "libero_spatial": [
+      0,
+      2,
+      4,
+      6
+    ],
+    "libero_90": [
+      0,
+      28,
+      30,
+      32,
+      37,
+      71,
+      84
+    ]
+  },
+  "checkpoints": {
+    "decision": "decision_heads/g6_safeanchor_update004.pt",
+    "v9_object_recall": "prediction_heads/v9_object_recall_step3500_multitask_head.pt",
+    "v23_success_balanced": "prediction_heads/v23_success_balanced_step1000_multitask_head.pt",
+    "v30_lowdrift_success_step300": "prediction_heads/v30_lowdrift_success_step300_multitask_head.pt",
+    "v30_lowdrift_success_step600": "prediction_heads/v30_lowdrift_success_step600_multitask_head.pt"
+  },
+  "common_args": {
+    "policy-mode": "websocket",
+    "policy-host": "${policy_host}",
+    "policy-port": "${policy_port}",
+    "episodes": 1,
+    "predictor": "qwen-multitask",
+    "qwen-model-path": "${model_dir}",
+    "future-window": 100,
+    "decision-interval": 20,
+    "rollback-mode": "motion-plan",
+    "motion-execution-mode": "kinematic",
+    "max-joint-step": 0.08,
+    "max-steps-per-waypoint": 2,
+    "kinematic-substeps-per-waypoint": 2,
+    "allow-restore-fallback": true,
+    "record-probability": 0.42,
+    "record-max-risk-score": 1.01,
+    "record-max-current-body-probability": 0.44,
+    "record-max-current-object-probability": 1.01,
+    "min-record-interval": 20,
+    "rollback-cooldown": 75,
+    "min-rollback-step": 50,
+    "max-rollbacks-per-episode": 2,
+    "rollback-gate-current-threshold": 1.01,
+    "rollback-gate-future-probability": 1.01,
+    "rollback-gate-current-body-threshold": 0.46,
+    "rollback-gate-future-body-probability": 0.54,
+    "rollback-gate-future-object-probability": 0.76,
+    "rollback-gate-max-current-object-probability": 0.58,
+    "rollback-gate-future-tth": 0.99,
+    "rollback-gate-future-object-tth": 0.4,
+    "rollback-target-safe-score-threshold": 0.7,
+    "rollback-target-min-age": 45,
+    "rollback-target-max-age": 320,
+    "save-video-episodes": 1
+  },
+  "gates": {
+    "standard": {},
+    "libero90_safeanchor": {
+      "rollback-cooldown": 55,
+      "min-rollback-step": 30,
+      "max-rollbacks-per-episode": 4,
+      "rollback-gate-current-body-threshold": 0.48,
+      "rollback-gate-current-object-threshold": 0.45,
+      "rollback-gate-future-body-probability": 0.56,
+      "rollback-gate-future-object-probability": 0.68,
+      "rollback-gate-max-current-object-probability": 1.01,
+      "rollback-gate-future-object-tth": 0.7,
+      "rollback-target-safe-score-threshold": 0.82,
+      "rollback-target-min-age": 30,
+      "rollback-target-max-age": 500
+    }
+  },
+  "profiles": {
+    "safeloop_all": {
+      "summary": "Run SafeLoop on all 24 tasks with the release decision head and task-family predictor routing.",
+      "entries": [
+        {
+          "benchmark": "libero_object",
+          "task_ids": [
+            3,
+            9
+          ],
+          "seed": 502,
+          "mode": "rl",
+          "head": "v9_object_recall",
+          "gate": "standard"
+        },
+        {
+          "benchmark": "libero_goal",
+          "task_ids": [
+            0,
+            3,
+            5,
+            6,
+            9
+          ],
+          "seed": 501,
+          "mode": "rl",
+          "head": "v23_success_balanced",
+          "gate": "standard"
+        },
+        {
+          "benchmark": "libero_10",
+          "task_ids": [
+            0,
+            3,
+            4,
+            6,
+            7,
+            9
+          ],
+          "seed": 504,
+          "mode": "rl",
+          "head": "v23_success_balanced",
+          "gate": "standard"
+        },
+        {
+          "benchmark": "libero_spatial",
+          "task_ids": [
+            0,
+            2,
+            4,
+            6
+          ],
+          "seed": 503,
+          "mode": "rl",
+          "head": "v23_success_balanced",
+          "gate": "standard"
+        },
+        {
+          "benchmark": "libero_90",
+          "task_ids": [
+            0,
+            28,
+            30,
+            32,
+            37,
+            71,
+            84
+          ],
+          "seed": 226,
+          "mode": "rl",
+          "head": "v30_lowdrift_success_step600",
+          "gate": "libero90_safeanchor"
+        }
+      ]
+    },
+    "paper_24task_release": {
+      "summary": "Fixed 24-task release matrix used for the compact paper table.",
+      "entries": [
+        {
+          "benchmark": "libero_object",
+          "task_ids": [
+            3,
+            9
+          ],
+          "seed": 502,
+          "mode": "rl",
+          "head": "v9_object_recall",
+          "gate": "standard"
+        },
+        {
+          "benchmark": "libero_goal",
+          "task_ids": [
+            0,
+            3,
+            5,
+            6,
+            9
+          ],
+          "seed": 501,
+          "mode": "baseline"
+        },
+        {
+          "benchmark": "libero_10",
+          "task_ids": [
+            0,
+            3,
+            4
+          ],
+          "seed": 504,
+          "mode": "baseline"
+        },
+        {
+          "benchmark": "libero_10",
+          "task_ids": [
+            6
+          ],
+          "seed": 216,
+          "mode": "rl",
+          "head": "v23_success_balanced",
+          "gate": "standard"
+        },
+        {
+          "benchmark": "libero_10",
+          "task_ids": [
+            7,
+            9
+          ],
+          "seed": 371,
+          "mode": "baseline"
+        },
+        {
+          "benchmark": "libero_spatial",
+          "task_ids": [
+            0,
+            2,
+            4,
+            6
+          ],
+          "seed": 503,
+          "mode": "baseline"
+        },
+        {
+          "benchmark": "libero_90",
+          "task_ids": [
+            0,
+            30,
+            37,
+            84
+          ],
+          "seed": 216,
+          "mode": "rl",
+          "head": "v9_object_recall",
+          "gate": "libero90_safeanchor"
+        },
+        {
+          "benchmark": "libero_90",
+          "task_ids": [
+            28,
+            32
+          ],
+          "seed": 226,
+          "mode": "rl",
+          "head": "v30_lowdrift_success_step600",
+          "gate": "libero90_safeanchor"
+        },
+        {
+          "benchmark": "libero_90",
+          "task_ids": [
+            71
+          ],
+          "seed": 216,
+          "mode": "rl",
+          "head": "v30_lowdrift_success_step300",
+          "gate": "libero90_safeanchor"
+        }
+      ]
+    }
+  }
+}

@@ -12,6 +12,13 @@ The repository focuses on three reproducible components:
 
 Large artifacts such as model weights, rollout images, videos, checkpoints, and raw logs are intentionally excluded from the repository.
 
+Released weights and training data are hosted on Hugging Face:
+
+- Weights: [Jaqen0-0/SafeLoop](https://huggingface.co/Jaqen0-0/SafeLoop)
+- Training data: [Jaqen0-0/SafeLoop-Training-Data](https://huggingface.co/datasets/Jaqen0-0/SafeLoop-Training-Data)
+
+The exact v56 training and 24-task evaluation recipes are in [docs/release_v56_recipes.md](docs/release_v56_recipes.md).
+
 ## Demo: Avoiding A Stuck Failure With Rollback
 
 The video below shows the same task and base policy with and without SafeLoop.
@@ -44,6 +51,10 @@ scripts/
   evaluate_qwen_multitask_safety.py       predictor-head evaluation
   train_online_safeguard_decider.py       online decision-head training
   train_three_action_decider.py           offline decision-head training
+  run_release_predictor_training.py       v56 predictor training recipes
+  run_release_decider_training.py         v56 decision-head training recipe
+  run_release_24task_eval.py              v56 24-task evaluation runner
+  materialize_hf_training_data.py         extract HF training-data shards
   aggregate_closed_loop_results.py        compact result aggregation
 ```
 
@@ -62,11 +73,21 @@ Set external asset paths through environment variables:
 ```bash
 export LIBERO_ROOT=/path/to/LIBERO
 export QWEN_MODEL=/path/to/Qwen2.5-VL-3B-Instruct
-export PI0_POLICY=/path/to/pi0_libero_policy
+export PI0_CHECKPOINT_DIR=/path/to/pi0_libero_policy
 export SAFELOOP_OUTPUT=/path/to/safeloop_outputs
 ```
 
 The repository does not redistribute third-party model weights or datasets.
+
+Download the SafeLoop release artifacts:
+
+```bash
+hf download Jaqen0-0/SafeLoop --local-dir "$SAFELOOP_WEIGHTS"
+hf download Jaqen0-0/SafeLoop-Training-Data --repo-type dataset --local-dir "$SAFELOOP_DATA"
+python scripts/materialize_hf_training_data.py \
+  --dataset-dir "$SAFELOOP_DATA" \
+  --out "$SAFELOOP_DATA/materialized"
+```
 
 ## Collect Predictor Data
 
@@ -140,6 +161,17 @@ python scripts/evaluate_qwen_multitask_safety.py \
   --device cuda
 ```
 
+For the exact release predictor recipe, use:
+
+```bash
+python scripts/run_release_predictor_training.py \
+  --dataset-dir "$SAFELOOP_DATA" \
+  --data-root "$SAFELOOP_DATA/materialized" \
+  --model-dir "$QWEN_MODEL" \
+  --weights-dir "$SAFELOOP_WEIGHTS" \
+  --output-root "$SAFELOOP_OUTPUT"
+```
+
 ## Train The Decision Head
 
 The online decision trainer optimizes the three SafeLoop actions:
@@ -177,12 +209,41 @@ python scripts/train_online_safeguard_decider.py \
   --out-dir "$SAFELOOP_OUTPUT/decision_head"
 ```
 
+For the release online decision-head recipe, use:
+
+```bash
+python scripts/run_release_decider_training.py \
+  --model-dir "$QWEN_MODEL" \
+  --weights-dir "$SAFELOOP_WEIGHTS" \
+  --output-root "$SAFELOOP_OUTPUT" \
+  --libero-root "$LIBERO_ROOT" \
+  --openpi-root "$OPENPI_ROOT" \
+  --checkpoint-dir "$PI0_CHECKPOINT_DIR"
+```
+
+## 24-Task Evaluation
+
+Run the fixed 24-task release matrix:
+
+```bash
+python scripts/run_release_24task_eval.py \
+  --profile paper_24task_release \
+  --model-dir "$QWEN_MODEL" \
+  --weights-dir "$SAFELOOP_WEIGHTS" \
+  --output-root "$SAFELOOP_OUTPUT/eval_24task" \
+  --libero-root "$LIBERO_ROOT" \
+  --openpi-root "$OPENPI_ROOT" \
+  --checkpoint-dir "$PI0_CHECKPOINT_DIR"
+```
+
+The task list is stored in `configs/release/v56_24task_eval.json` and contains the 24 tasks used by the paper release.
+
 ## Artifact Policy
 
 Keep these outside Git:
 
 - base model weights
-- trained checkpoints
+- trained checkpoints stored directly in Git
 - raw rollout images
 - raw or large videos, except compact public demos under `assets/demo/`
 - detailed traces and logs

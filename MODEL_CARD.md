@@ -19,9 +19,14 @@ SafeLoop is an outer-loop safety controller for robotic manipulation research. I
 - LIBERO-style hazard prediction and rollback experiments.
 - Offline and online training of safety prediction and decision modules.
 
-## Not Included
+## Public Artifacts
 
-This repository does not include base policy weights, Qwen weights, trained SafeLoop checkpoints, rollout images, videos, or raw training logs. Users must obtain compatible third-party assets separately and follow their licenses.
+SafeLoop checkpoints and release training data are hosted outside Git:
+
+- Weights: https://huggingface.co/Jaqen0-0/SafeLoop
+- Training data: https://huggingface.co/datasets/Jaqen0-0/SafeLoop-Training-Data
+
+The repository does not include base policy weights, Qwen weights, raw rollout traces, or raw training logs. Users must obtain compatible third-party assets separately and follow their licenses.
 
 ## Safety Notes
 

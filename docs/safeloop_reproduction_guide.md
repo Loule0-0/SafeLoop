@@ -2,6 +2,8 @@
 
 This guide describes the public, reproducible pipeline for SafeLoop. It intentionally avoids raw experiment logs and machine-specific artifact paths.
 
+For the exact v56 release recipes, artifact links, and 24-task evaluation matrix, see [release_v56_recipes.md](release_v56_recipes.md).
+
 ## Method Summary
 
 SafeLoop wraps a frozen base manipulation policy with three modules:
@@ -51,7 +53,7 @@ The multitask predictor uses recent visual observations, robot state, and the pr
 - current body or stuck hazard
 - current object hazard
 
-The future labels are read from the two-line assistant target in each JSONL sample. Current labels are either explicit in the sample or derived from marked trajectory steps with a configurable tolerance.
+The future labels are read from the two-line label target in each JSONL sample. Current labels are either explicit in the sample or derived from marked trajectory steps with a configurable tolerance.
 
 ## Predictor Training
 

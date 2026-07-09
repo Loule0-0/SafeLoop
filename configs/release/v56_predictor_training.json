@@ -1,0 +1,143 @@
+{
+  "release": "v56_24task_release",
+  "paper": "SafeLoop: Risk-Aware Rollback for Vision-Language-Action Manipulation",
+  "huggingface": {
+    "weights_repo": "Jaqen0-0/SafeLoop",
+    "dataset_repo": "Jaqen0-0/SafeLoop-Training-Data"
+  },
+  "heads": {
+    "v9_object_recall": "prediction_heads/v9_object_recall_step3500_multitask_head.pt",
+    "v23_success_balanced": "prediction_heads/v23_success_balanced_step1000_multitask_head.pt",
+    "v30_lowdrift_success_step300": "prediction_heads/v30_lowdrift_success_step300_multitask_head.pt",
+    "v30_lowdrift_success_step600": "prediction_heads/v30_lowdrift_success_step600_multitask_head.pt"
+  },
+  "recipes": [
+    {
+      "name": "v9_object_recall",
+      "summary": "Object-recall stage used by object-heavy and selected LIBERO-90 release rows.",
+      "expected_checkpoints": [
+        "step_003500/multitask_head.pt"
+      ],
+      "args": {
+        "model-dir": "${model_dir}",
+        "data": "${dataset_dir}/data/hardcase_v9_with20260706_controller_ablation.jsonl",
+        "data-root": "${data_root}",
+        "out": "${output_root}/prediction_heads/v9_object_recall",
+        "epochs": 1,
+        "batch-size": 8,
+        "eval-batch-size": 8,
+        "lr": 5e-05,
+        "weight-decay": 0.01,
+        "train-mode": "frozen",
+        "freeze-backbone": true,
+        "device": "cuda",
+        "future-window": 100,
+        "current-tolerance": 5,
+        "val-ratio": 0.1,
+        "seed": 42,
+        "neck-size": 512,
+        "dropout": 0.1,
+        "num-workers": 0,
+        "max-grad-norm": 1.0,
+        "future-bce-weight": 1.0,
+        "future-tth-weight": 1.0,
+        "current-bce-weight": 1.0,
+        "body-weight": 0.5,
+        "object-weight": 1.2,
+        "current-positive-sample-weight": 1.0,
+        "current-body-positive-sample-weight": 1.0,
+        "current-object-positive-sample-weight": 3.0,
+        "pos-weight-cap": 20.0,
+        "init-head": "${weights_dir}/prediction_heads/init_v8_balanced_step1500_multitask_head.pt",
+        "save-every": 1,
+        "save-steps": 500,
+        "grad-accum-steps": 1
+      }
+    },
+    {
+      "name": "v23_success_balanced",
+      "summary": "Success-balanced stage that improves current hazard separation while preserving task success.",
+      "expected_checkpoints": [
+        "step_001000/multitask_head.pt"
+      ],
+      "args": {
+        "model-dir": "${model_dir}",
+        "data": "${dataset_dir}/data/merged_v23_large_clean.jsonl",
+        "data-root": "${data_root}",
+        "out": "${output_root}/prediction_heads/v23_success_balanced",
+        "epochs": 1,
+        "batch-size": 8,
+        "eval-batch-size": 8,
+        "lr": 1e-05,
+        "weight-decay": 0.01,
+        "train-mode": "frozen",
+        "bf16": true,
+        "device": "cuda",
+        "current-tolerance": 5,
+        "val-ratio": 0.08,
+        "seed": 930,
+        "neck-size": 512,
+        "dropout": 0.12,
+        "num-workers": 0,
+        "max-samples": 60000,
+        "max-grad-norm": 1.0,
+        "future-bce-weight": 1.0,
+        "future-tth-weight": 1.0,
+        "current-bce-weight": 1.35,
+        "body-weight": 1.15,
+        "object-weight": 1.15,
+        "current-positive-sample-weight": 1.6,
+        "current-body-positive-sample-weight": 4.0,
+        "current-object-positive-sample-weight": 3.2,
+        "pos-weight-cap": 25.0,
+        "init-head": "${weights_dir}/prediction_heads/init_v13_ultra_lowdrift_success_step0100_multitask_head.pt",
+        "save-every": 1,
+        "save-steps": 500,
+        "grad-accum-steps": 1
+      }
+    },
+    {
+      "name": "v30_lowdrift_success",
+      "summary": "Final low-drift stuck/object stage used for the release predictor-head bundle.",
+      "expected_checkpoints": [
+        "step_000300/multitask_head.pt",
+        "step_000600/multitask_head.pt"
+      ],
+      "args": {
+        "model-dir": "${model_dir}",
+        "data": "${dataset_dir}/data/merged_v30_newstuck_oversample4.jsonl",
+        "data-root": "${data_root}",
+        "out": "${output_root}/prediction_heads/v30_lowdrift_success",
+        "epochs": 1,
+        "batch-size": 8,
+        "eval-batch-size": 8,
+        "lr": 3e-06,
+        "weight-decay": 0.01,
+        "train-mode": "frozen",
+        "bf16": true,
+        "device": "cuda",
+        "current-tolerance": 5,
+        "val-ratio": 0.08,
+        "seed": 992,
+        "neck-size": 512,
+        "dropout": 0.14,
+        "num-workers": 0,
+        "max-samples": 120000,
+        "max-grad-norm": 1.0,
+        "future-bce-weight": 0.95,
+        "future-tth-weight": 0.95,
+        "current-bce-weight": 1.25,
+        "body-weight": 1.08,
+        "object-weight": 1.08,
+        "current-positive-sample-weight": 1.35,
+        "current-body-positive-sample-weight": 4.0,
+        "current-object-positive-sample-weight": 2.8,
+        "pos-weight-cap": 24.0,
+        "init-head": "${weights_dir}/prediction_heads/v23_success_balanced_step1000_multitask_head.pt",
+        "save-every": 1,
+        "save-steps": 300,
+        "grad-accum-steps": 1
+      }
+    }
+  ]
+}
