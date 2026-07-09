@@ -12,6 +12,7 @@ Large artifacts such as model weights, rollout images, videos, checkpoints, and 
 
 ## Repository Layout
 
+
 ```text
 safety_guard/
   controller.py                 SafeLoop controller and rollback interface
