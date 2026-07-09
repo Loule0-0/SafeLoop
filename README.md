@@ -18,7 +18,6 @@ The video below shows the same task and base policy with and without SafeLoop.
 
 ![pi0 gets stuck while SafeLoop rolls back and completes the task](assets/demo/pi0_vs_safeloop_task09_seed214_ep0_labeled_red_green_boxes.gif)
 
-[Open the MP4 demo video](assets/demo/pi0_vs_safeloop_task09_seed214_ep0_labeled_red_green_boxes.mp4)
 
 Left: the original pi0 policy enters a stuck state during execution. Right: the same policy is wrapped with SafeLoop. SafeLoop detects the risky trajectory, rolls back to a recorded safe waypoint, and then allows the policy to replan a successful path to finish the task. The colored overlays are kept in the video to make the safety event and recovery behavior easy to inspect.
 
