@@ -2,7 +2,7 @@
 
 **Paper:** SafeLoop: Risk-Aware Rollback for Vision-Language-Action Manipulation
 
-SafeLoop is an outer-loop safety controller for frozen robotic manipulation policies. It monitors a base policy, records safe anchors, predicts short-horizon hazards, and can roll back to a safe anchor before handing control back to the base policy.
+SafeLoop is an outer-loop safety controller for frozen robotic manipulation policies. This release uses **pi0 as the base policy**: SafeLoop does not fine-tune pi0, but monitors its proposed execution, records safe anchors, predicts short-horizon hazards, and can roll back before handing control back to pi0 for replanning.
 
 The repository focuses on three reproducible components:
 
@@ -10,7 +10,7 @@ The repository focuses on three reproducible components:
 - Fine-tune a lightweight Qwen2.5-VL multitask prediction head.
 - Train a three-action decision head for `noop`, `record`, and `rollback`.
 
-Large artifacts such as model weights, rollout images, videos, checkpoints, and raw logs are intentionally excluded from the repository.
+Large artifacts such as model weights, rollout images, checkpoints, and raw logs are intentionally excluded from the repository. Only compact, manually reviewed project-page demos are kept under `assets/demo/`.
 
 Released weights and training data are hosted on Hugging Face:
 
@@ -27,6 +27,12 @@ The video below shows the same task and base policy with and without SafeLoop.
 
 
 Left: the original pi0 policy enters a stuck state during execution. Right: the same policy is wrapped with SafeLoop. SafeLoop detects the risky trajectory, rolls back to a recorded safe waypoint, and then allows the policy to replan a successful path to finish the task. The colored overlays are kept in the video to make the safety event and recovery behavior easy to inspect.
+
+### Safe Rollback Followed By Task Success
+
+![SafeLoop rolls back safely and completes LIBERO_10 task 6](assets/demo/safeloop_libero10_task06_seed389_rollback_success.gif)
+
+This manually reviewed rollout uses pi0 with SafeLoop on LIBERO_10 task 6, seed 389. SafeLoop records an anchor, triggers one rollback at step 50, reaches the anchor without collision, and then resumes pi0 execution to complete the task. The orange label marks the rollback frames; the green border identifies SafeLoop execution. The original MP4 is listed in [`assets/demo`](assets/demo/README.md).
 
 ## Repository Layout
 
@@ -55,27 +61,51 @@ scripts/
   run_release_decider_training.py         v56 decision-head training recipe
   run_release_24task_eval.py              v56 24-task evaluation runner
   materialize_hf_training_data.py         extract HF training-data shards
+  check_release_environment.py            dependency, submodule, and artifact checks
+  setup_release_env.sh                     reproducible Python environment setup
   aggregate_closed_loop_results.py        compact result aggregation
+
+third_party/
+  LIBERO/                                 pinned simulator submodule
+  openpi/                                 pinned pi0 policy/client submodule
 ```
 
 ## Setup
 
-Install the package in an environment with the required robotics, vision, and simulation dependencies:
+The tested release layout uses Python 3.10 for SafeLoop, Qwen, and LIBERO. The pi0 policy server keeps OpenPI's separate Python 3.11 environment. LIBERO and the OpenPI fork are pinned as Git submodules, and the Qwen/PyTorch versions are pinned in `pyproject.toml`.
+
+On Ubuntu, install the small set of system packages needed by Python virtual environments, video export, and headless MuJoCo rendering:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3.10 python3.10-venv git ffmpeg libegl1 libgl1 libglfw3 libosmesa6
+```
+
+The pi0 server also requires `uv`; follow the pinned OpenPI submodule's installation instructions if it is not already available.
 
 ```bash
 git clone https://github.com/Loule0-0/SafeLoop.git
 cd SafeLoop
-pip install -e .
+bash scripts/setup_release_env.sh
+source .venv/bin/activate
 ```
+
+The setup script initializes the two pinned top-level submodules. Do not install `third_party/LIBERO/requirements.txt` directly: that legacy file pins an old Transformers version that is incompatible with the Qwen2.5-VL predictor. The release setup installs the compatible simulation set from `requirements/libero-eval.txt` instead.
 
 Set external asset paths through environment variables:
 
 ```bash
 export LIBERO_ROOT=/path/to/LIBERO
+export OPENPI_ROOT=/path/to/openpi
 export QWEN_MODEL=/path/to/Qwen2.5-VL-3B-Instruct
 export PI0_CHECKPOINT_DIR=/path/to/pi0_libero_policy
+export SAFELOOP_WEIGHTS=/path/to/safeloop_weights
+export SAFELOOP_DATA=/path/to/safeloop_training_data
 export SAFELOOP_OUTPUT=/path/to/safeloop_outputs
+export MUJOCO_GL=egl
 ```
+
+When using the bundled submodules, `LIBERO_ROOT` and `OPENPI_ROOT` can point to `$PWD/third_party/LIBERO` and `$PWD/third_party/openpi`.
 
 The repository does not redistribute third-party model weights or datasets.
 
@@ -84,9 +114,38 @@ Download the SafeLoop release artifacts:
 ```bash
 hf download Jaqen0-0/SafeLoop --local-dir "$SAFELOOP_WEIGHTS"
 hf download Jaqen0-0/SafeLoop-Training-Data --repo-type dataset --local-dir "$SAFELOOP_DATA"
+hf download Qwen/Qwen2.5-VL-3B-Instruct --local-dir "$QWEN_MODEL"
 python scripts/materialize_hf_training_data.py \
   --dataset-dir "$SAFELOOP_DATA" \
   --out "$SAFELOOP_DATA/materialized"
+```
+
+Validate the complete evaluation environment and downloaded checkpoints:
+
+```bash
+python scripts/check_release_environment.py --scope eval
+```
+
+## Start The pi0 Policy Server
+
+SafeLoop's default release evaluation uses the OpenPI websocket client. Start pi0 in a separate terminal before launching the 24-task runner:
+
+```bash
+cd "$OPENPI_ROOT"
+uv sync --frozen
+uv run scripts/serve_policy.py policy:checkpoint \
+  --policy.config=pi0_libero \
+  --policy.dir="$PI0_CHECKPOINT_DIR"
+```
+
+The server listens on `127.0.0.1:8000` by default. From the SafeLoop environment, verify both dependencies and connectivity with:
+
+```bash
+python scripts/check_release_environment.py \
+  --scope eval \
+  --check-policy-server \
+  --policy-host 127.0.0.1 \
+  --policy-port 8000
 ```
 
 ## Collect Predictor Data
