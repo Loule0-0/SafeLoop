@@ -1,6 +1,6 @@
 # Demo Assets
 
-This directory contains compact, manually reviewed media selected for the public project page. Automatic simulator hazard counters are not used to certify these examples.
+This directory contains compact, manually reviewed SafeLoop demos. A demo may come from any LIBERO task; it does not need to belong to the paper's 24-task evaluation suite. Automatic simulator hazard counters are not used to certify these examples.
 
 | Files | Task | Outcome |
 |---|---|---|
@@ -9,4 +9,4 @@ This directory contains compact, manually reviewed media selected for the public
 
 The side-by-side demo keeps the original red/green overlays. In the SafeLoop-only demo, the green border denotes SafeLoop execution and the orange `ROLLBACK` label marks the recovery segment.
 
-The final assembled v56 evaluation contains additional rollback records whose runs did not save video. They are intentionally not represented here. Failed trajectories and visually unsafe candidates are also excluded.
+Only rollouts that visibly demonstrate rollback without a resulting hazard are retained. Failed or visually unsafe candidates are excluded.

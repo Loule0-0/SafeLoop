@@ -1,40 +1,41 @@
-# SafeLoop
+# SafeLoop: Risk-Aware Rollback for Vision-Language-Action Manipulation
 
-**Paper:** SafeLoop: Risk-Aware Rollback for Vision-Language-Action Manipulation
+**Paper:** Coming soon
 
-SafeLoop is an outer-loop safety controller for frozen robotic manipulation policies. This release uses **pi0 as the base policy**: SafeLoop does not fine-tune pi0, but monitors its proposed execution, records safe anchors, predicts short-horizon hazards, and can roll back before handing control back to pi0 for replanning.
+**Project website:** Coming soon
 
-The repository focuses on three reproducible components:
+---
+
+## Overview
+
+SafeLoop is an outer-loop safety framework for robotic manipulation policies. It detects risky trajectories before danger occurs, rolls back to a recorded safe state, and lets the policy replan from that state using its stochasticity and generalization ability.
+
+This repository provides the complete code needed to:
 
 - Collect closed-loop rollout data with hazard labels.
 - Fine-tune a lightweight Qwen2.5-VL multitask prediction head.
 - Train a three-action decision head for `noop`, `record`, and `rollback`.
-
-Large artifacts such as model weights, rollout images, checkpoints, and raw logs are intentionally excluded from the repository. Only compact, manually reviewed project-page demos are kept under `assets/demo/`.
 
 Released weights and training data are hosted on Hugging Face:
 
 - Weights: [Jaqen0-0/SafeLoop](https://huggingface.co/Jaqen0-0/SafeLoop)
 - Training data: [Jaqen0-0/SafeLoop-Training-Data](https://huggingface.co/datasets/Jaqen0-0/SafeLoop-Training-Data)
 
-The exact v56 training and 24-task evaluation recipes are in [docs/release_v56_recipes.md](docs/release_v56_recipes.md).
+The exact release training and 24-task evaluation recipes are documented in [docs/release_v56_recipes.md](docs/release_v56_recipes.md).
 
-## Demo: Avoiding A Stuck Failure With Rollback
+---
 
-The video below shows the same task and base policy with and without SafeLoop.
+## Demo
+
+The video below compares the same task and policy with and without SafeLoop.
 
 ![pi0 gets stuck while SafeLoop rolls back and completes the task](assets/demo/pi0_vs_safeloop_task09_seed214_ep0_labeled_red_green_boxes.gif)
 
+Left: the original policy enters a stuck state during execution. Right: SafeLoop detects the risky trajectory, rolls back to a recorded safe waypoint without causing a hazard, and replans a successful path to finish the task. The original red and green overlays are retained for visual inspection.
 
-Left: the original pi0 policy enters a stuck state during execution. Right: the same policy is wrapped with SafeLoop. SafeLoop detects the risky trajectory, rolls back to a recorded safe waypoint, and then allows the policy to replan a successful path to finish the task. The colored overlays are kept in the video to make the safety event and recovery behavior easy to inspect.
+---
 
-### Safe Rollback Followed By Task Success
-
-![SafeLoop rolls back safely and completes LIBERO_10 task 6](assets/demo/safeloop_libero10_task06_seed389_rollback_success.gif)
-
-This manually reviewed rollout uses pi0 with SafeLoop on LIBERO_10 task 6, seed 389. SafeLoop records an anchor, triggers one rollback at step 50, reaches the anchor without collision, and then resumes pi0 execution to complete the task. The orange label marks the rollback frames; the green border identifies SafeLoop execution. The original MP4 is listed in [`assets/demo`](assets/demo/README.md).
-
-## Repository Layout
+## Repository Structure
 
 ```text
 safety_guard/
@@ -67,12 +68,16 @@ scripts/
 
 third_party/
   LIBERO/                                 pinned simulator submodule
-  openpi/                                 pinned pi0 policy/client submodule
+  openpi/                                 pinned OpenPI policy/client submodule
 ```
 
-## Setup
+---
 
-The tested release layout uses Python 3.10 for SafeLoop, Qwen, and LIBERO. The pi0 policy server keeps OpenPI's separate Python 3.11 environment. LIBERO and the OpenPI fork are pinned as Git submodules, and the Qwen/PyTorch versions are pinned in `pyproject.toml`.
+## Installation
+
+The tested release layout uses Python 3.10 for SafeLoop, Qwen, and LIBERO. The OpenPI policy server uses its separate Python 3.11 environment. LIBERO and the OpenPI fork are pinned as Git submodules, and the Qwen/PyTorch versions are pinned in `pyproject.toml`.
+
+### 1. Install System Dependencies
 
 On Ubuntu, install the small set of system packages needed by Python virtual environments, video export, and headless MuJoCo rendering:
 
@@ -81,7 +86,9 @@ sudo apt-get update
 sudo apt-get install -y python3.10 python3.10-venv git ffmpeg libegl1 libgl1 libglfw3 libosmesa6
 ```
 
-The pi0 server also requires `uv`; follow the pinned OpenPI submodule's installation instructions if it is not already available.
+The policy server also requires `uv`; follow the pinned OpenPI submodule's installation instructions if it is not already available.
+
+### 2. Clone and Create the Environment
 
 ```bash
 git clone https://github.com/Loule0-0/SafeLoop.git
@@ -91,6 +98,8 @@ source .venv/bin/activate
 ```
 
 The setup script initializes the two pinned top-level submodules. Do not install `third_party/LIBERO/requirements.txt` directly: that legacy file pins an old Transformers version that is incompatible with the Qwen2.5-VL predictor. The release setup installs the compatible simulation set from `requirements/libero-eval.txt` instead.
+
+### 3. Configure Paths
 
 Set external asset paths through environment variables:
 
@@ -109,7 +118,7 @@ When using the bundled submodules, `LIBERO_ROOT` and `OPENPI_ROOT` can point to 
 
 The repository does not redistribute third-party model weights or datasets.
 
-Download the SafeLoop release artifacts:
+### 4. Download Models and Data
 
 ```bash
 hf download Jaqen0-0/SafeLoop --local-dir "$SAFELOOP_WEIGHTS"
@@ -120,15 +129,17 @@ python scripts/materialize_hf_training_data.py \
   --out "$SAFELOOP_DATA/materialized"
 ```
 
-Validate the complete evaluation environment and downloaded checkpoints:
+### 5. Validate the Installation
 
 ```bash
 python scripts/check_release_environment.py --scope eval
 ```
 
-## Start The pi0 Policy Server
+---
 
-SafeLoop's default release evaluation uses the OpenPI websocket client. Start pi0 in a separate terminal before launching the 24-task runner:
+## Start the Policy Server
+
+SafeLoop's default release evaluation uses the OpenPI websocket client. Start the policy server in a separate terminal before launching data collection, training, or evaluation:
 
 ```bash
 cd "$OPENPI_ROOT"
@@ -148,7 +159,9 @@ python scripts/check_release_environment.py \
   --policy-port 8000
 ```
 
-## Collect Predictor Data
+---
+
+## Collect Training Data
 
 Closed-loop rollout collection can save Qwen-style samples for future hazard prediction:
 
@@ -175,7 +188,9 @@ Each predictor sample contains recent camera frames, robot state, the proposed n
 
 The dataset loader also derives current body/object hazard labels from marked trajectory steps when explicit current labels are unavailable.
 
-## Train The Prediction Head
+---
+
+## Train the Prediction Head
 
 The default predictor training path freezes the Qwen2.5-VL backbone and trains a compact multitask head:
 
@@ -231,7 +246,9 @@ python scripts/run_release_predictor_training.py \
   --output-root "$SAFELOOP_OUTPUT"
 ```
 
-## Train The Decision Head
+---
+
+## Train the Decision Head
 
 The online decision trainer optimizes the three SafeLoop actions:
 
@@ -280,7 +297,9 @@ python scripts/run_release_decider_training.py \
   --checkpoint-dir "$PI0_CHECKPOINT_DIR"
 ```
 
-## 24-Task Evaluation
+---
+
+## Evaluation
 
 Run the default 24-task SafeLoop evaluation matrix. This expands to 24 tasks x 16 seeds, matching the paper protocol.
 
@@ -298,6 +317,8 @@ The task list and seed list are stored in `configs/release/v56_24task_eval.json`
 
 Paper hazard metrics should be filled from manual video or trajectory review. The release runner therefore enables `--manual-hazard-labels` by default and marks automatic hazard fields as requiring review.
 
+---
+
 ## Artifact Policy
 
 Keep these outside Git:
@@ -311,6 +332,8 @@ Keep these outside Git:
 
 For a paper release, publish compact tables in the paper or project page and provide external artifact links for weights and datasets when licenses allow.
 
+---
+
 ## Tests
 
 Run the unit tests with:
@@ -318,3 +341,9 @@ Run the unit tests with:
 ```bash
 python -m unittest discover -s tests
 ```
+
+---
+
+## Citation
+
+Citation information will be added after publication.
