@@ -1,9 +1,5 @@
 # SafeLoop: Risk-Aware Rollback for Vision-Language-Action Manipulation
 
-**Paper:** Coming soon
-
-**Project website:** Coming soon
-
 ---
 
 ## Overview
