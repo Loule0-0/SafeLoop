@@ -78,12 +78,13 @@ class PeriodicDecider:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Closed-loop LIBERO/pi0 evaluation for SafeLoop.")
+    parser = argparse.ArgumentParser(description="Closed-loop LIBERO VLA evaluation for SafeLoop.")
     parser.add_argument("--project-root", type=Path, default=PROJECT_ROOT)
     parser.add_argument("--openpi-root", type=Path, default=env_path("OPENPI_ROOT"))
     parser.add_argument("--libero-root", type=Path, default=env_path("LIBERO_ROOT"))
     parser.add_argument("--checkpoint-dir", type=Path, default=env_path("PI0_CHECKPOINT_DIR"))
     parser.add_argument("--config-name", default="pi0_libero")
+    parser.add_argument("--policy-backend", choices=["pi0", "openvla-oft"], default="pi0")
     parser.add_argument("--policy-mode", choices=["inprocess", "websocket"], default="inprocess")
     parser.add_argument("--policy-host", default="127.0.0.1")
     parser.add_argument("--policy-port", type=int, default=8000)
@@ -92,6 +93,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--task-ids", nargs="+")
     parser.add_argument("--episodes", "--episodes-per-task", dest="episodes", type=int, default=1)
     parser.add_argument("--init-state-start", type=int, default=0)
+    parser.add_argument(
+        "--fixed-init-state-index",
+        type=int,
+        help="Reuse one LIBERO initial state while episode seeds advance; intended for paired stress tests.",
+    )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--camera-size", type=int, default=256)
     parser.add_argument("--resize-size", type=int, default=224)
@@ -126,6 +132,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--auto-record-max-risk-score", type=float, default=0.4)
     parser.add_argument("--auto-record-max-current-body-probability", type=float, default=0.3)
     parser.add_argument("--auto-record-max-current-object-probability", type=float, default=0.45)
+    parser.add_argument("--stuck-fallback", action="store_true")
+    parser.add_argument("--stuck-window-steps", type=int, default=70)
+    parser.add_argument("--stuck-min-low-motion-steps", type=int, default=50)
+    parser.add_argument("--stuck-max-step-displacement", type=float, default=0.0025)
+    parser.add_argument("--stuck-max-window-displacement", type=float, default=0.025)
     parser.add_argument("--rollback-probability", type=float, default=0.55)
     parser.add_argument("--rollback-tth", type=float, default=0.35)
     parser.add_argument("--min-record-interval", type=int, default=30)
@@ -142,6 +153,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rollback-gate-future-tth", type=float, default=0.0)
     parser.add_argument("--rollback-gate-future-object-tth", type=float)
     parser.add_argument("--rollback-gate-allow-risk-override", action="store_true")
+    parser.add_argument("--rollback-gate-allow-stuck-object-override", action="store_true")
+    parser.add_argument("--stuck-override-min-rollback-probability", type=float, default=0.95)
+    parser.add_argument("--stuck-rollback-target-max-age", type=int)
     parser.add_argument("--rollback-target-safe-score-threshold", type=float, default=0.6)
     parser.add_argument("--rollback-target-min-age", type=int, default=30)
     parser.add_argument("--rollback-target-max-age", type=int, default=120)
@@ -257,6 +271,8 @@ def make_decider(args: argparse.Namespace):
             future_tth_threshold=args.rollback_gate_future_tth,
             future_object_tth_threshold=args.rollback_gate_future_object_tth,
             allow_risk_override=args.rollback_gate_allow_risk_override,
+            allow_stuck_object_override=args.rollback_gate_allow_stuck_object_override,
+            stuck_override_min_rollback_probability=args.stuck_override_min_rollback_probability,
             min_rollback_step=args.min_rollback_step,
         )
     return PeriodicDecider(decider, period=max(1, args.decision_period))
@@ -282,7 +298,10 @@ def run_episode(env, task, init_states, policy, args: argparse.Namespace, episod
     np.random.seed(args.seed + episode_index)
     env.seed(args.seed + episode_index)
     env.reset()
-    init_index = (args.init_state_start + episode_index) % len(init_states)
+    if args.fixed_init_state_index is None:
+        init_index = (args.init_state_start + episode_index) % len(init_states)
+    else:
+        init_index = int(args.fixed_init_state_index) % len(init_states)
     obs = env.set_init_state(init_states[init_index])
     use_hazard_oracle = (not args.manual_hazard_labels) or args.qwen_rollout_jsonl_out is not None
     oracle = LiberoHazardOracle(env.sim) if use_hazard_oracle else None
@@ -321,10 +340,12 @@ def run_episode(env, task, init_states, policy, args: argparse.Namespace, episod
             ),
             max_history=3,
             max_steps=args.max_rollout_steps,
+            prediction_period=args.decision_period,
             rollback_target_safe_score_threshold=args.rollback_target_safe_score_threshold,
             rollback_target_min_age=args.rollback_target_min_age,
             rollback_target_max_age=args.rollback_target_max_age,
             rollback_target_require_safe=args.rollback_target_require_safe,
+            stuck_rollback_target_max_age=args.stuck_rollback_target_max_age,
             record_max_risk_score=args.record_max_risk_score,
             record_max_current_body_probability=args.record_max_current_body_probability,
             record_max_current_object_probability=args.record_max_current_object_probability,
@@ -333,6 +354,11 @@ def run_episode(env, task, init_states, policy, args: argparse.Namespace, episod
             auto_record_max_risk_score=args.auto_record_max_risk_score,
             auto_record_max_current_body_probability=args.auto_record_max_current_body_probability,
             auto_record_max_current_object_probability=args.auto_record_max_current_object_probability,
+            stuck_fallback=args.stuck_fallback,
+            stuck_window_steps=args.stuck_window_steps,
+            stuck_min_low_motion_steps=args.stuck_min_low_motion_steps,
+            stuck_max_step_displacement=args.stuck_max_step_displacement,
+            stuck_max_window_displacement=args.stuck_max_window_displacement,
         )
 
     suite_max_steps = max_steps_for_suite(args.benchmark)
@@ -348,7 +374,17 @@ def run_episode(env, task, init_states, policy, args: argparse.Namespace, episod
             continue
 
         if not action_plan:
-            action_chunk = policy.infer(policy_observation(obs, task.language, args.resize_size))["actions"]
+            policy_input = policy_observation(
+                obs,
+                task.language,
+                args.resize_size,
+                policy_backend=args.policy_backend,
+                benchmark=args.benchmark,
+            )
+            if args.policy_backend == "openvla-oft":
+                policy_input["policy/episode_seed"] = int(args.seed + episode_index)
+                policy_input["policy/reset"] = total_steps == 0
+            action_chunk = policy.infer(policy_input)["actions"]
             if len(action_chunk) < args.replan_steps:
                 raise RuntimeError(f"policy returned {len(action_chunk)} actions, need {args.replan_steps}")
             action_plan.extend(np.asarray(action_chunk[: args.replan_steps]))
@@ -703,6 +739,7 @@ def main() -> None:
         )
     result = {
         "mode": args.mode,
+        "policy_backend": args.policy_backend,
         "predictor": args.predictor,
         "benchmark": args.benchmark,
         "task_id": args.task_ids[0] if len(args.task_ids) == 1 else None,

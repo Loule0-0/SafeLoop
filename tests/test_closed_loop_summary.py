@@ -6,11 +6,15 @@ from tempfile import TemporaryDirectory
 
 from PIL import Image
 
-from scripts.evaluate_pi0_safeguard_closed_loop import summarize, write_qwen_rollout_samples
+from scripts.evaluate_pi0_safeguard_closed_loop import parse_args, summarize, write_qwen_rollout_samples
 from safety_guard.online_rl import OnlineStepSignals
 
 
 class ClosedLoopSummaryTests(unittest.TestCase):
+    def test_fixed_initial_state_is_available_for_paired_stress_tests(self):
+        args = parse_args(["--fixed-init-state-index", "13", "--out", "summary.json"])
+        self.assertEqual(args.fixed_init_state_index, 13)
+
     def test_summary_counts_rollback_rendered_frames_as_effective_control_steps(self):
         reports = [
             {

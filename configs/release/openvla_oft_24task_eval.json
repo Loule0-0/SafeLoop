@@ -1,0 +1,38 @@
+{
+  "extends": "v56_24task_eval.json",
+  "release": "openvla_oft_24task_release",
+  "base_policy": {
+    "name": "OpenVLA-OFT",
+    "checkpoint": "moojink/openvla-7b-oft-finetuned-libero-spatial-object-goal-10",
+    "action_chunk_size": 8,
+    "libero_90_unnorm_key": "libero_10_no_noops"
+  },
+  "checkpoints": {
+    "decision": "decision_heads/openvla_oft_libero10/online_decider_update004.pt"
+  },
+  "common_args": {
+    "policy-backend": "openvla-oft",
+    "qwen-dtype": "bfloat16",
+    "replan-steps": 8,
+    "stuck-fallback": true,
+    "stuck-window-steps": 70,
+    "stuck-min-low-motion-steps": 50,
+    "stuck-max-step-displacement": 0.0025,
+    "stuck-max-window-displacement": 0.025,
+    "rollback-gate-allow-stuck-object-override": true,
+    "stuck-override-min-rollback-probability": 0.95,
+    "stuck-rollback-target-max-age": 320,
+    "rollback-gate-future-body-probability": 0.72,
+    "rollback-gate-future-tth": 0.5,
+    "rollback-gate-max-current-object-probability": 0.3,
+    "rollback-gate-future-object-probability": 0.92,
+    "rollback-gate-future-object-tth": 0.18,
+    "rollback-target-max-age": 160,
+    "rollback-target-require-safe": true,
+    "auto-record-safe-anchors": true,
+    "auto-record-min-interval": 40,
+    "auto-record-max-risk-score": 0.72,
+    "auto-record-max-current-body-probability": 0.44,
+    "auto-record-max-current-object-probability": 0.58
+  }
+}

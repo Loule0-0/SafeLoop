@@ -61,6 +61,7 @@ class RLPolicyDecider:
         current_hazard_history: Sequence[Sequence[float]] | None = None,
         current_body_probability: float = 0.0,
         current_object_probability: float = 0.0,
+        rollback_target_available: bool | None = None,
         max_steps: int | None = None,
     ) -> Intervention:
         can_record = _cooldown_elapsed(step_index, last_record_step, self.min_record_interval)
@@ -69,6 +70,8 @@ class RLPolicyDecider:
             last_rollback_step,
             self.rollback_cooldown,
         )
+        if rollback_target_available is not None:
+            can_rollback = can_rollback and bool(rollback_target_available)
         action_mask = build_action_mask(can_record=can_record, can_rollback=can_rollback)
 
         joints = self._coerce_joint_history(joint_history, observation, proposed_action)
@@ -138,6 +141,8 @@ class RollbackGateDecider:
     future_tth_threshold: float = 0.0
     future_object_tth_threshold: float | None = None
     allow_risk_override: bool = False
+    allow_stuck_object_override: bool = False
+    stuck_override_min_rollback_probability: float = 0.95
     min_rollback_step: int = 0
     rollback_count: int = 0
     last_decision_info: dict[str, Any] = field(default_factory=dict, init=False)
@@ -216,6 +221,7 @@ class RollbackGateDecider:
                 step_index=step_index,
             )
             return Intervention.NOOP
+        stuck_override = self._stuck_override_allowed(inner_info=inner_info, kwargs=kwargs)
         if not is_high_confidence_rollback(
             risk,
             current_body_probability=current_body_probability,
@@ -223,7 +229,7 @@ class RollbackGateDecider:
             current_hazard_threshold=self.current_hazard_threshold,
             current_body_threshold=self.current_body_threshold,
             current_object_threshold=self.current_object_threshold,
-            max_current_object_probability=self.max_current_object_probability,
+            max_current_object_probability=(None if stuck_override else self.max_current_object_probability),
             future_probability_threshold=self.future_probability_threshold,
             future_body_probability_threshold=self.future_body_probability_threshold,
             future_object_probability_threshold=self.future_object_probability_threshold,
@@ -247,7 +253,7 @@ class RollbackGateDecider:
             inner_action=action,
             final_action=Intervention.ROLLBACK,
             allowed=True,
-            reason="allowed",
+            reason="stuck_object_override" if stuck_override else "allowed",
             risk=risk,
             current_body_probability=current_body_probability,
             current_object_probability=current_object_probability,
@@ -255,6 +261,18 @@ class RollbackGateDecider:
             step_index=step_index,
         )
         return Intervention.ROLLBACK
+
+    def _stuck_override_allowed(self, inner_info: Any | None, kwargs: dict[str, Any]) -> bool:
+        if not self.allow_stuck_object_override or not bool(kwargs.get("stuck_detected", False)):
+            return False
+        if not isinstance(inner_info, dict):
+            return False
+        probabilities = inner_info.get("action_probabilities")
+        if not isinstance(probabilities, (list, tuple)) or len(probabilities) <= int(ThreeAction.ROLLBACK):
+            return False
+        return float(probabilities[int(ThreeAction.ROLLBACK)]) >= float(
+            self.stuck_override_min_rollback_probability
+        )
 
     def _risk_override_allowed(
         self,
@@ -357,6 +375,8 @@ class RollbackGateDecider:
                 else float(self.future_object_tth_threshold)
             ),
             "allow_risk_override": bool(self.allow_risk_override),
+            "allow_stuck_object_override": bool(self.allow_stuck_object_override),
+            "stuck_override_min_rollback_probability": float(self.stuck_override_min_rollback_probability),
             "risk": {
                 "body_probability": float(risk.body_probability),
                 "body_tth": float(risk.body_tth),

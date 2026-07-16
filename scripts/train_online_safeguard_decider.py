@@ -15,6 +15,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from safety_guard.controller import (
+    ProprioceptiveStuckMonitor,
+    apply_stuck_fallback,
     capture_env_state,
     execute_rollback,
     extract_robot_joint_vector,
@@ -78,6 +80,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--libero-root", type=Path, default=env_path("LIBERO_ROOT"))
     parser.add_argument("--checkpoint-dir", type=Path, default=env_path("PI0_CHECKPOINT_DIR"))
     parser.add_argument("--config-name", default="pi0_libero")
+    parser.add_argument("--policy-backend", choices=["pi0", "openvla-oft"], default="pi0")
     parser.add_argument("--policy-mode", choices=["inprocess", "websocket"], default="inprocess")
     parser.add_argument("--policy-host", default="127.0.0.1")
     parser.add_argument("--policy-port", type=int, default=8000)
@@ -114,6 +117,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--record-exploration-probability", type=float, default=0.0)
     parser.add_argument("--min-rollback-step", type=int, default=0)
     parser.add_argument("--max-rollbacks-per-episode", type=int)
+    parser.add_argument("--stuck-fallback", action="store_true")
+    parser.add_argument("--stuck-window-steps", type=int, default=70)
+    parser.add_argument("--stuck-min-low-motion-steps", type=int, default=50)
+    parser.add_argument("--stuck-max-step-displacement", type=float, default=0.0025)
+    parser.add_argument("--stuck-max-window-displacement", type=float, default=0.025)
+    parser.add_argument("--rollback-gate-allow-stuck-object-override", action="store_true")
+    parser.add_argument("--stuck-rollback-target-max-age", type=int)
     parser.add_argument("--rollback-gate-current-threshold", type=float, default=1.01)
     parser.add_argument("--rollback-gate-current-body-threshold", type=float)
     parser.add_argument("--rollback-gate-current-object-threshold", type=float)
@@ -134,6 +144,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rollback-target-min-age", type=int, default=30)
     parser.add_argument("--rollback-target-max-age", type=int, default=120)
     parser.add_argument("--updates", type=int, default=4)
+    parser.add_argument("--update-start-index", type=int, default=0)
+    parser.add_argument("--total-schedule-updates", type=int)
     parser.add_argument("--episodes-per-update", "--episodes-per-task", dest="episodes_per_update", type=int, default=1)
     parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
@@ -258,6 +270,7 @@ def rollback_allowed_by_gate(
     current_object: float,
     rollback_count: int,
     step_index: int,
+    stuck_detected: bool = False,
 ) -> bool:
     if int(step_index) < int(args.min_rollback_step):
         return False
@@ -265,6 +278,9 @@ def rollback_allowed_by_gate(
         return False
     if not rollback_gate_enabled(args):
         return True
+    max_current_object_probability = args.rollback_gate_max_current_object_probability
+    if bool(getattr(args, "rollback_gate_allow_stuck_object_override", False)) and bool(stuck_detected):
+        max_current_object_probability = None
     return is_high_confidence_rollback(
         risk,
         current_body_probability=current_body,
@@ -272,7 +288,7 @@ def rollback_allowed_by_gate(
         current_hazard_threshold=args.rollback_gate_current_threshold,
         current_body_threshold=args.rollback_gate_current_body_threshold,
         current_object_threshold=args.rollback_gate_current_object_threshold,
-        max_current_object_probability=args.rollback_gate_max_current_object_probability,
+        max_current_object_probability=max_current_object_probability,
         future_probability_threshold=args.rollback_gate_future_probability,
         future_body_probability_threshold=args.rollback_gate_future_body_probability,
         future_object_probability_threshold=args.rollback_gate_future_object_probability,
@@ -377,6 +393,12 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
     obs = env.set_init_state(init_states[init_index])
     oracle = LiberoHazardOracle(env.sim)
     memory = WaypointMemory()
+    stuck_monitor = ProprioceptiveStuckMonitor(
+        window_steps=args.stuck_window_steps,
+        min_low_motion_steps=args.stuck_min_low_motion_steps,
+        max_step_displacement=args.stuck_max_step_displacement,
+        max_window_displacement=args.stuck_max_window_displacement,
+    )
     teacher = RuleBasedDecider(
         record_probability=args.record_probability,
         rollback_probability=args.rollback_probability,
@@ -487,11 +509,20 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
             continue
         step_index = step - args.num_steps_wait
         if not action_plan:
-            action_chunk = base_policy.infer(policy_observation(obs, task.language, args.resize_size))["actions"]
+            action_chunk = base_policy.infer(
+                policy_observation(
+                    obs,
+                    task.language,
+                    args.resize_size,
+                    policy_backend=args.policy_backend,
+                    benchmark=args.benchmark,
+                )
+            )["actions"]
             if len(action_chunk) < args.replan_steps:
                 raise RuntimeError(f"policy returned {len(action_chunk)} actions, need {args.replan_steps}")
             action_plan.extend(np.asarray(action_chunk[: args.replan_steps]))
         proposed_action = action_plan.popleft()
+        stuck_detected = bool(args.stuck_fallback and stuck_monitor.update(obs))
         pre_action_signals = None
         if args.qwen_rollout_jsonl_out is not None:
             pre_action_signals = oracle.read(success=False, task_reward=0.0)
@@ -543,6 +574,7 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
 
         prediction = predictor.predict(obs, proposed_action.tolist(), instruction=task.language)
         risk, current_body, current_object = normalize_risk_prediction(prediction)
+        risk, current_body = apply_stuck_fallback(risk, current_body, stuck_detected)
         joint_history.append(extract_robot_joint_vector(obs, proposed_action))
         risk_history.append(risk)
         current_history.append((current_body, current_object))
@@ -555,15 +587,28 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
         rollback_gate_open = (
             len(memory) > 0
             and cool_down_elapsed(step_index, last_rollback_step, args.rollback_cooldown)
-            and rollback_allowed_by_gate(args, risk, current_body, current_object, rollback_count, step_index)
+            and rollback_allowed_by_gate(
+                args,
+                risk,
+                current_body,
+                current_object,
+                rollback_count,
+                step_index,
+                stuck_detected=stuck_detected,
+            )
         )
         if rollback_gate_open:
             try:
+                rollback_target_max_age = (
+                    args.stuck_rollback_target_max_age
+                    if stuck_detected and args.stuck_rollback_target_max_age is not None
+                    else args.rollback_target_max_age
+                )
                 rollback_waypoint = memory.select_rollback(
                     current_step_index=step_index,
                     safe_score_threshold=args.rollback_target_safe_score_threshold,
                     min_safe_age=args.rollback_target_min_age,
-                    max_safe_age=args.rollback_target_max_age,
+                    max_safe_age=rollback_target_max_age,
                     require_safe=True,
                 )
             except IndexError:
@@ -633,6 +678,7 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
                 "action": int(action),
                 "intervention": intervention.value,
                 "executed_rollback": bool(intervention == Intervention.ROLLBACK and can_rollback),
+                "stuck_fallback": bool(stuck_detected),
                 "explored_rollback": bool(explored_rollback),
                 "explored_record": bool(explored_record),
                 "action_probabilities": action_probabilities,
@@ -685,8 +731,19 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
             rollback_target_age = int(step_index) - int(waypoint.step_index)
             rollback_target_risk_score = float(_waypoint_risk_score(waypoint))
             obs, rollback_info = execute_rollback(env, waypoint, rollback_executor)
+            stuck_monitor.reset()
             rollback_motion_info = dict(rollback_info)
             rollback_failed = bool(rollback_info.get("safe") is False or rollback_info.get("reached") is False)
+            if not rollback_failed:
+                anchor_metadata = dict(waypoint.metadata)
+                anchor_metadata["source"] = "rollback_anchor"
+                memory.record(
+                    step_index=step_index,
+                    state=capture_env_state(env),
+                    risk=waypoint.risk,
+                    metadata=anchor_metadata,
+                )
+                last_record_step = step_index
             rendered_frames = int(rollback_info.get("rendered_frames") or 0)
             rollback_rendered_frames += rendered_frames
             rollback_events.append(
@@ -883,9 +940,16 @@ def main() -> None:
         decision_policy,
         AsymmetricPPOConfig(learning_rate=args.lr, bc_coef=args.bc_coef),
     )
+    update_end_index = args.update_start_index + args.updates
+    total_schedule_updates = args.total_schedule_updates or update_end_index
+    if args.update_start_index < 0 or args.updates <= 0:
+        raise ValueError("update-start-index must be non-negative and updates must be positive")
+    if total_schedule_updates < update_end_index:
+        raise ValueError("total-schedule-updates must cover every requested update")
+
     all_metrics = []
     global_episode = 0
-    for update_index in range(args.updates):
+    for update_index in range(args.update_start_index, update_end_index):
         update_records: list[dict] = []
         update_reports: list[dict] = []
         for task_id in args.task_ids:
@@ -910,7 +974,7 @@ def main() -> None:
             finally:
                 env.close()
         batch = batch_from_online_records(update_records)
-        coef = bc_coef_for_update(update_index, args.updates, args.bc_coef, args.bc_anneal_fraction)
+        coef = bc_coef_for_update(update_index, total_schedule_updates, args.bc_coef, args.bc_anneal_fraction)
         history = trainer.update(batch, epochs=args.ppo_epochs, bc_coef=coef)
         checkpoint = args.out_dir / f"online_decider_update{update_index:03d}.pt"
         export_actor_checkpoint(decision_policy, checkpoint)

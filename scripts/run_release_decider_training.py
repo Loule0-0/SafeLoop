@@ -41,6 +41,17 @@ def _append_arg(command: list[str], key: str, value: Any) -> None:
     command.extend([flag, str(value)])
 
 
+def _parse_override(value: str) -> tuple[str, Any]:
+    key, separator, raw_value = value.partition("=")
+    if not separator or not key:
+        raise argparse.ArgumentTypeError("overrides must use KEY=VALUE")
+    try:
+        parsed_value = json.loads(raw_value)
+    except json.JSONDecodeError:
+        parsed_value = raw_value
+    return key, parsed_value
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
@@ -52,6 +63,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkpoint-dir", type=Path)
     parser.add_argument("--policy-host", default="127.0.0.1")
     parser.add_argument("--policy-port", type=int, default=8000)
+    parser.add_argument(
+        "--set",
+        dest="overrides",
+        action="append",
+        default=[],
+        type=_parse_override,
+        metavar="KEY=VALUE",
+        help="Override one recipe argument; VALUE accepts JSON scalars and arrays.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -65,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
     config = json.loads(args.config.read_text(encoding="utf-8"))
     recipe = config["recipe"]
     recipe_args = _replace_placeholders(recipe["args"], context)
+    for key, value in args.overrides:
+        recipe_args[key] = value
     command = [sys.executable, str(PROJECT_ROOT / "scripts" / "train_online_safeguard_decider.py")]
     for key, value in recipe_args.items():
         _append_arg(command, key, value)

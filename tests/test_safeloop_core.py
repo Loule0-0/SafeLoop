@@ -6,6 +6,7 @@ from safety_guard import (
     Intervention,
     RiskVector,
     RuleBasedDecider,
+    ProprioceptiveStuckMonitor,
     SafeLoopController,
     WaypointMemory,
     build_actor_features,
@@ -79,8 +80,10 @@ class FakePreciseLiberoEnv:
 class QueuePredictor:
     def __init__(self, risks):
         self.risks = list(risks)
+        self.calls = 0
 
     def predict(self, observation, proposed_action, instruction=None):
+        self.calls += 1
         if not self.risks:
             raise AssertionError("predict called more times than expected")
         return self.risks.pop(0)
@@ -107,7 +110,128 @@ class TraceNoopDecider:
         return Intervention.NOOP
 
 
+class CaptureNoopDecider:
+    def __init__(self):
+        self.calls = []
+
+    def decide(self, **kwargs):
+        self.calls.append(kwargs)
+        return Intervention.NOOP
+
+
+class ConfidentRollbackDecider:
+    def __init__(self, probability=0.99):
+        self.probability = float(probability)
+        self.last_decision_info = {}
+
+    def decide(self, **kwargs):
+        self.last_decision_info = {
+            "can_rollback": True,
+            "action_probabilities": [1.0 - self.probability, 0.0, self.probability],
+        }
+        return Intervention.ROLLBACK
+
+
+class AvailableTargetDecider:
+    def decide(self, rollback_target_available=False, **kwargs):
+        return Intervention.ROLLBACK if rollback_target_available else Intervention.NOOP
+
+
 class SafeLoopCoreTests(unittest.TestCase):
+    def test_stuck_path_can_select_an_older_verified_safe_waypoint(self):
+        env = FakeLiberoEnv([2.0, 2.0])
+        memory = WaypointMemory()
+        memory.record(
+            step_index=0,
+            state=np.asarray([0.0, 0.0], dtype=np.float32),
+            risk=RiskVector(0.01, 1.0, 0.01, 1.0),
+        )
+        low_risk = RiskVector(0.01, 1.0, 0.01, 1.0)
+        controller = SafeLoopController(
+            predictor=QueuePredictor([low_risk, low_risk]),
+            decider=AvailableTargetDecider(),
+            memory=memory,
+            rollback_target_min_age=30,
+            rollback_target_max_age=120,
+            stuck_rollback_target_max_age=240,
+            rollback_target_require_safe=True,
+            stuck_fallback=True,
+            stuck_window_steps=2,
+            stuck_min_low_motion_steps=1,
+            stuck_max_step_displacement=0.01,
+            stuck_max_window_displacement=0.02,
+        )
+        controller.step_index = 199
+        observation = {"robot0_eef_pos": [0.0, 0.0, 0.0], "joint_pos": [0.0, 0.0]}
+
+        first = controller.step(env, observation, proposed_action=[0.0, 0.0])
+        second = controller.step(env, observation, proposed_action=[0.0, 0.0])
+
+        self.assertEqual(first.intervention, Intervention.NOOP)
+        self.assertEqual(second.intervention, Intervention.ROLLBACK)
+        np.testing.assert_allclose(second.observation["state"], [0.0, 0.0])
+        self.assertEqual(controller.memory.latest().step_index, 200)
+        self.assertEqual(controller.memory.latest().metadata["source"], "rollback_anchor")
+        self.assertTrue(second.info["safeloop"]["refreshed_rollback_anchor"])
+
+    def test_controller_runs_predictor_only_on_decision_steps(self):
+        env = FakeLiberoEnv([0.0, 0.0])
+        low_risk = RiskVector(0.01, 1.0, 0.01, 1.0)
+        predictor = QueuePredictor([low_risk, low_risk])
+        decider = CaptureNoopDecider()
+        controller = SafeLoopController(
+            predictor=predictor,
+            decider=decider,
+            prediction_period=2,
+        )
+
+        first = controller.step(env, {"joint_pos": [0.0, 0.0]}, [0.0, 0.0])
+        second = controller.step(env, {"joint_pos": [0.0, 0.0]}, [0.0, 0.0])
+        third = controller.step(env, {"joint_pos": [0.0, 0.0]}, [0.0, 0.0])
+
+        self.assertEqual(predictor.calls, 2)
+        self.assertEqual(len(decider.calls), 2)
+        self.assertEqual(first.intervention, Intervention.NOOP)
+        self.assertFalse(second.info["safeloop"]["decision"]["due"])
+        self.assertEqual(third.intervention, Intervention.NOOP)
+
+    def test_proprioceptive_stuck_monitor_uses_sustained_low_motion(self):
+        monitor = ProprioceptiveStuckMonitor(
+            window_steps=4,
+            min_low_motion_steps=3,
+            max_step_displacement=0.01,
+            max_window_displacement=0.02,
+        )
+
+        self.assertFalse(monitor.update({"robot0_eef_pos": [0.0, 0.0, 0.0]}))
+        self.assertFalse(monitor.update({"robot0_eef_pos": [0.001, 0.0, 0.0]}))
+        self.assertFalse(monitor.update({"robot0_eef_pos": [0.002, 0.0, 0.0]}))
+        self.assertTrue(monitor.update({"robot0_eef_pos": [0.003, 0.0, 0.0]}))
+        self.assertFalse(monitor.update({"robot0_eef_pos": [0.2, 0.0, 0.0]}))
+
+    def test_controller_exposes_stuck_fallback_as_body_risk_to_decider(self):
+        env = FakeLiberoEnv([0.0, 0.0])
+        low_risk = RiskVector(0.01, 1.0, 0.01, 1.0)
+        decider = CaptureNoopDecider()
+        controller = SafeLoopController(
+            predictor=QueuePredictor([low_risk, low_risk, low_risk]),
+            decider=decider,
+            stuck_fallback=True,
+            stuck_window_steps=3,
+            stuck_min_low_motion_steps=2,
+            stuck_max_step_displacement=0.01,
+            stuck_max_window_displacement=0.02,
+        )
+        observation = {"robot0_eef_pos": [0.0, 0.0, 0.0], "joint_pos": [0.0, 0.0]}
+
+        controller.step(env, observation, proposed_action=[0.0, 0.0])
+        controller.step(env, observation, proposed_action=[0.0, 0.0])
+        result = controller.step(env, observation, proposed_action=[0.0, 0.0])
+
+        self.assertEqual(decider.calls[-1]["current_body_probability"], 1.0)
+        self.assertEqual(decider.calls[-1]["risk"].body_probability, 1.0)
+        self.assertTrue(result.info["safeloop"]["stuck_fallback"])
+
     def test_low_risk_records_waypoint_and_executes_nominal_action(self):
         env = FakeLiberoEnv([3.0, 4.0])
         predictor = QueuePredictor(
@@ -177,6 +301,7 @@ class SafeLoopCoreTests(unittest.TestCase):
         )
         decider = RuleBasedDecider(record_probability=0.05, rollback_probability=0.8)
         controller = SafeLoopController(predictor=predictor, decider=decider, memory=memory)
+        controller.step_index = 30
 
         result = controller.step(env, observation={}, proposed_action=[5.0, 5.0])
 
@@ -267,6 +392,7 @@ class SafeLoopCoreTests(unittest.TestCase):
             memory=memory,
             rollback_executor=RejectingRollbackExecutor(),
         )
+        controller.step_index = 30
 
         result = controller.step(env, observation={"state": env.state.copy()}, proposed_action=[5.0, 5.0])
 
@@ -279,6 +405,37 @@ class SafeLoopCoreTests(unittest.TestCase):
         self.assertFalse(result.info["safeloop"]["safe"])
         self.assertFalse(result.info["safeloop"]["reached"])
         self.assertEqual(result.info["safeloop"]["reason"], "collision_on_linear_path")
+
+    def test_rollback_selection_never_uses_an_expired_waypoint(self):
+        memory = WaypointMemory()
+        memory.record(step_index=0, state=np.asarray([1.0, 2.0], dtype=np.float32))
+
+        with self.assertRaisesRegex(IndexError, "rollback age constraints"):
+            memory.select_rollback(
+                current_step_index=360,
+                min_safe_age=45,
+                max_safe_age=320,
+                require_safe=False,
+            )
+
+    def test_rollback_selection_falls_back_only_within_age_window(self):
+        memory = WaypointMemory()
+        memory.record(step_index=0, state=np.asarray([0.0, 0.0], dtype=np.float32))
+        expected = memory.record(
+            step_index=300,
+            state=np.asarray([3.0, 3.0], dtype=np.float32),
+            risk=RiskVector(0.9, 0.1, 0.9, 0.1),
+        )
+
+        selected = memory.select_rollback(
+            current_step_index=360,
+            safe_score_threshold=0.4,
+            min_safe_age=45,
+            max_safe_age=320,
+            require_safe=False,
+        )
+
+        self.assertIs(selected, expected)
 
     def test_controller_uses_precise_sim_state_when_env_exposes_sim(self):
         env = FakePreciseLiberoEnv()
@@ -294,6 +451,7 @@ class SafeLoopCoreTests(unittest.TestCase):
         controller = SafeLoopController(
             predictor=predictor,
             decider=RuleBasedDecider(record_probability=0.05, rollback_probability=0.8),
+            rollback_target_min_age=1,
         )
 
         controller.step(env, observation={}, proposed_action=[5.0, 5.0])
@@ -455,6 +613,33 @@ class SafeLoopCoreTests(unittest.TestCase):
 
         self.assertEqual(action, Intervention.NOOP)
         self.assertEqual(decider.rollback_count, 0)
+
+    def test_stuck_override_requires_confident_learned_rollback(self):
+        risk = RiskVector(1.0, 0.0, 0.9, 0.1)
+        blocked = RollbackGateDecider(
+            ConfidentRollbackDecider(probability=0.9),
+            current_body_threshold=0.46,
+            max_current_object_probability=0.3,
+            allow_stuck_object_override=True,
+            stuck_override_min_rollback_probability=0.95,
+        )
+        allowed = RollbackGateDecider(
+            ConfidentRollbackDecider(probability=0.99),
+            current_body_threshold=0.46,
+            max_current_object_probability=0.3,
+            allow_stuck_object_override=True,
+            stuck_override_min_rollback_probability=0.95,
+        )
+
+        self.assertEqual(
+            blocked.decide(risk, current_body_probability=1.0, current_object_probability=0.99, stuck_detected=True),
+            Intervention.NOOP,
+        )
+        self.assertEqual(
+            allowed.decide(risk, current_body_probability=1.0, current_object_probability=0.99, stuck_detected=True),
+            Intervention.ROLLBACK,
+        )
+        self.assertEqual(allowed.last_decision_info["gate_reason"], "stuck_object_override")
 
     def test_waypoint_memory_prefers_recent_low_risk_point_when_current_step_is_known(self):
         memory = WaypointMemory()

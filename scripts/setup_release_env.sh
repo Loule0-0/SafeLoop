@@ -6,7 +6,7 @@ PYTHON_BIN="${PYTHON_BIN:-python3.10}"
 VENV_DIR="${VENV_DIR:-${ROOT}/.venv}"
 
 cd "${ROOT}"
-git submodule update --init third_party/LIBERO third_party/openpi
+git submodule update --init third_party/LIBERO third_party/openpi third_party/openvla-oft
 
 "${PYTHON_BIN}" -m venv "${VENV_DIR}"
 source "${VENV_DIR}/bin/activate"

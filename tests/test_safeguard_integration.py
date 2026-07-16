@@ -62,6 +62,7 @@ class SafeGuardIntegrationTests(unittest.TestCase):
             predictor=ConstantRiskPredictor(RiskVector(1.0, 0.0, 0.0, 1.0)),
             decider=AlwaysRollbackAfterRecord(),
             rollback_executor=executor,
+            rollback_target_min_age=0,
         )
 
         first = controller.step(env, {"robot0_joint_pos": np.zeros(7)}, np.zeros(7))

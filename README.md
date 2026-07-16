@@ -11,6 +11,7 @@ This repository provides the complete code needed to:
 - Collect closed-loop rollout data with hazard labels.
 - Fine-tune a lightweight Qwen2.5-VL multitask prediction head.
 - Train a three-action decision head for `noop`, `record`, and `rollback`.
+- Run the same SafeLoop controller with Pi-0 or OpenVLA-OFT base policies.
 
 Released weights and training data are hosted on Hugging Face:
 
@@ -41,6 +42,7 @@ safety_guard/
   libero_oracle.py              optional simulation signals for data/debug
   qwen_multitask.py             multitask predictor dataset, head, loss, inference
   rl_policy_decider.py          three-action decision policy wrapper
+  openvla_oft.py                OpenVLA-OFT normalization and action adapter
   online_rl.py                  online policy optimization utilities
   rollout_sampling.py           rollout sampling for predictor data
 
@@ -60,18 +62,21 @@ scripts/
   materialize_hf_training_data.py         extract HF training-data shards
   check_release_environment.py            dependency, submodule, and artifact checks
   setup_release_env.sh                     reproducible Python environment setup
+  serve_openvla_oft.py                     OpenVLA-OFT websocket policy server
+  setup_openvla_oft_env.sh                 isolated OpenVLA-OFT environment
   aggregate_closed_loop_results.py        compact result aggregation
 
 third_party/
   LIBERO/                                 pinned simulator submodule
   openpi/                                 pinned OpenPI policy/client submodule
+  openvla-oft/                            pinned official OpenVLA-OFT submodule
 ```
 
 ---
 
 ## Installation
 
-The tested release layout uses Python 3.10 for SafeLoop, Qwen, and LIBERO. The OpenPI policy server uses its separate Python 3.11 environment. LIBERO and the OpenPI fork are pinned as Git submodules, and the Qwen/PyTorch versions are pinned in `pyproject.toml`.
+The tested release layout uses Python 3.10 for SafeLoop, Qwen, and LIBERO. The OpenPI and OpenVLA-OFT policy servers use separate environments so their model dependencies cannot conflict. LIBERO, OpenPI, and the official OpenVLA-OFT implementation are pinned as Git submodules.
 
 ### 1. Install System Dependencies
 
@@ -111,6 +116,7 @@ export MUJOCO_GL=egl
 ```
 
 When using the bundled submodules, `LIBERO_ROOT` and `OPENPI_ROOT` can point to `$PWD/third_party/LIBERO` and `$PWD/third_party/openpi`.
+On NVIDIA containers that omit the GLVND vendor registration, the rollout utilities automatically use `configs/runtime/10_nvidia.json` when `libEGL_nvidia.so.0` is available.
 
 The repository does not redistribute third-party model weights or datasets.
 
@@ -153,6 +159,28 @@ python scripts/check_release_environment.py \
   --check-policy-server \
   --policy-host 127.0.0.1 \
   --policy-port 8000
+```
+
+For OpenVLA-OFT, create its isolated environment and start the combined LIBERO checkpoint on a separate GPU:
+
+```bash
+CONDA_SH=/path/to/conda.sh bash scripts/setup_openvla_oft_env.sh
+bash scripts/download_openvla_oft_checkpoint.sh
+CUDA_VISIBLE_DEVICES=0 bash scripts/launch_openvla_oft_server.sh
+```
+
+For unattended server setup, `scripts/launch_openvla_oft_download.sh` writes resumable download progress and status under `outputs/`.
+
+The adapter uses the official two-view, proprioceptive, center-cropped, eight-action OFT inference path. See [docs/openvla_oft.md](docs/openvla_oft.md) for normalization-key handling and the complete training recipe.
+
+Validate either policy endpoint with the same release checker:
+
+```bash
+python scripts/check_release_environment.py \
+  --scope eval \
+  --check-policy-server \
+  --policy-backend openvla-oft \
+  --policy-port 8001
 ```
 
 ---
@@ -293,6 +321,19 @@ python scripts/run_release_decider_training.py \
   --checkpoint-dir "$PI0_CHECKPOINT_DIR"
 ```
 
+To adapt the released predictor and generic decider to OpenVLA-OFT rollouts, keep the OpenVLA server active and run:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python scripts/run_release_decider_training.py \
+  --config configs/release/openvla_oft_decider_training.json \
+  --model-dir "$QWEN_MODEL" \
+  --weights-dir "$SAFELOOP_WEIGHTS" \
+  --output-root "$SAFELOOP_OUTPUT/openvla_oft" \
+  --policy-port 8001
+```
+
+This recipe uses complete 520-step LIBERO-10 episodes. Its rollback gate suppresses interventions during active object contact, requires a low-risk waypoint from the recent 45-160-step window, and includes record exploration so the learned policy has usable rollback anchors.
+
 ---
 
 ## Evaluation
@@ -309,7 +350,22 @@ python scripts/run_release_24task_eval.py \
   --checkpoint-dir "$PI0_CHECKPOINT_DIR"
 ```
 
-The task list and seed list are stored in `configs/release/v56_24task_eval.json`. The default profile is `safeloop_all`; the baseline-only comparison is available as `--profile pi0_baseline_reference`.
+The task list and seed list are stored in `configs/release/v56_24task_eval.json`. Each seed also selects the matching LIBERO initial-state index, so the default profile evaluates 16 seeds and 16 initial states per task. The default profile is `safeloop_all`; the baseline-only comparison is available as `--profile base_policy_reference`. Use `--seeds 0` for a 24-task smoke test without changing the release config.
+
+The OpenVLA-OFT matrix keeps the same 24 tasks and 16 seeds while switching to its eight-action horizon and policy-specific decider. The public combined OpenVLA-OFT checkpoint natively provides statistics for the 17 selected Spatial, Object, Goal, and LIBERO-10 tasks. The seven LIBERO-90 entries are retained as explicitly out-of-suite tests through the documented normalization fallback and should be reported separately from native-suite results.
+
+```bash
+python scripts/run_release_24task_eval.py \
+  --config configs/release/openvla_oft_24task_eval.json \
+  --model-dir "$QWEN_MODEL" \
+  --weights-dir "$SAFELOOP_WEIGHTS" \
+  --output-root "$SAFELOOP_OUTPUT/openvla_oft_eval_24task" \
+  --policy-port 8001
+```
+
+During checkpoint selection, pass `--decision-checkpoint /path/to/candidate.pt` to evaluate a candidate actor without editing the release config.
+
+Use `scripts/launch_openvla_oft_eval.sh` for a one-task installation check before the full matrix. It runs the same SafeLoop gates, writes a status file, and saves the rollout video for manual hazard review.
 
 Paper hazard metrics should be filled from manual video or trajectory review. The release runner therefore enables `--manual-hazard-labels` by default and marks automatic hazard fields as requiring review.
 

@@ -18,6 +18,7 @@ EXPECTED_PYTHON = (3, 10)
 PINNED_SUBMODULES = {
     "third_party/LIBERO": "8f1084e3132a39270c3a13ebe37270a43ece2a01",
     "third_party/openpi": "b14bcf2989a46de9cc379f837b5a96a46a3948f4",
+    "third_party/openvla-oft": "e4287e94541f459edc4feabc4e181f537cd569a8",
 }
 REQUIRED_MODULES = {
     "accelerate": "accelerate",
@@ -113,18 +114,19 @@ def _check_eval_assets() -> list[str]:
     return errors
 
 
-def _check_policy_server(host: str, port: int) -> str | None:
+def _check_policy_server(host: str, port: int, backend: str) -> str | None:
     try:
         with socket.create_connection((host, port), timeout=2.0):
             return None
     except OSError as exc:
-        return f"cannot connect to pi0 policy server at {host}:{port}: {exc}"
+        return f"cannot connect to {backend} policy server at {host}:{port}: {exc}"
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scope", choices=["install", "eval"], default="install")
     parser.add_argument("--check-policy-server", action="store_true")
+    parser.add_argument("--policy-backend", choices=["pi0", "openvla-oft"], default="pi0")
     parser.add_argument("--policy-host", default="127.0.0.1")
     parser.add_argument("--policy-port", type=int, default=8000)
     args = parser.parse_args(argv)
@@ -133,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.scope == "eval":
         errors.extend(_check_eval_assets())
     if args.check_policy_server:
-        policy_error = _check_policy_server(args.policy_host, args.policy_port)
+        policy_error = _check_policy_server(args.policy_host, args.policy_port, args.policy_backend)
         if policy_error:
             errors.append(policy_error)
 

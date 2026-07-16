@@ -29,6 +29,58 @@ class RollbackExecutor(Protocol):
 
 
 @dataclass
+class ProprioceptiveStuckMonitor:
+    window_steps: int = 70
+    min_low_motion_steps: int = 50
+    max_step_displacement: float = 0.0025
+    max_window_displacement: float = 0.025
+    _positions: Deque[np.ndarray] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.window_steps < 2:
+            raise ValueError("window_steps must be at least two")
+        self._positions = deque(maxlen=int(self.window_steps))
+
+    def reset(self) -> None:
+        self._positions.clear()
+
+    def update(self, observation: Any) -> bool:
+        position = extract_robot_eef_position(observation)
+        if position is None:
+            self.reset()
+            return False
+        self._positions.append(position)
+        if len(self._positions) < int(self.window_steps):
+            return False
+        positions = np.stack(list(self._positions))
+        step_displacements = np.linalg.norm(np.diff(positions, axis=0), axis=1)
+        low_motion_steps = int(np.count_nonzero(step_displacements <= float(self.max_step_displacement)))
+        window_displacement = float(np.linalg.norm(positions[-1] - positions[0]))
+        return bool(
+            low_motion_steps >= int(self.min_low_motion_steps)
+            and window_displacement <= float(self.max_window_displacement)
+        )
+
+
+def apply_stuck_fallback(
+    risk: RiskVector,
+    current_body_probability: float,
+    stuck_detected: bool,
+) -> tuple[RiskVector, float]:
+    if not stuck_detected:
+        return risk, float(current_body_probability)
+    return (
+        RiskVector(
+            body_probability=max(float(risk.body_probability), 1.0),
+            body_tth=0.0,
+            object_probability=float(risk.object_probability),
+            object_tth=float(risk.object_tth),
+        ),
+        max(float(current_body_probability), 1.0),
+    )
+
+
+@dataclass
 class SafeLoopStepResult:
     observation: Any
     reward: float
@@ -47,10 +99,12 @@ class SafeLoopController:
     rollback_executor: RollbackExecutor | None = None
     max_history: int = 3
     max_steps: int | None = None
+    prediction_period: int = 1
     rollback_target_safe_score_threshold: float = 0.6
     rollback_target_max_age: int = 120
     rollback_target_min_age: int = 30
     rollback_target_require_safe: bool = False
+    stuck_rollback_target_max_age: int | None = None
     record_max_risk_score: float | None = None
     record_max_current_body_probability: float | None = None
     record_max_current_object_probability: float | None = None
@@ -59,19 +113,33 @@ class SafeLoopController:
     auto_record_max_risk_score: float = 0.4
     auto_record_max_current_body_probability: float = 0.3
     auto_record_max_current_object_probability: float = 0.45
+    stuck_fallback: bool = False
+    stuck_window_steps: int = 70
+    stuck_min_low_motion_steps: int = 50
+    stuck_max_step_displacement: float = 0.0025
+    stuck_max_window_displacement: float = 0.025
     step_index: int = 0
     last_record_step: int | None = None
     last_rollback_step: int | None = None
     _joint_history: Deque[np.ndarray] = field(init=False, repr=False)
     _risk_history: Deque[RiskVector] = field(init=False, repr=False)
     _current_hazard_history: Deque[tuple[float, float]] = field(init=False, repr=False)
+    _stuck_monitor: ProprioceptiveStuckMonitor = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.max_history <= 0:
             raise ValueError("max_history must be positive")
+        if self.prediction_period <= 0:
+            raise ValueError("prediction_period must be positive")
         self._joint_history = deque(maxlen=self.max_history)
         self._risk_history = deque(maxlen=self.max_history)
         self._current_hazard_history = deque(maxlen=self.max_history)
+        self._stuck_monitor = ProprioceptiveStuckMonitor(
+            window_steps=self.stuck_window_steps,
+            min_low_motion_steps=self.stuck_min_low_motion_steps,
+            max_step_displacement=self.stuck_max_step_displacement,
+            max_window_displacement=self.stuck_max_window_displacement,
+        )
 
     def reset(self) -> None:
         self.memory.clear()
@@ -81,6 +149,7 @@ class SafeLoopController:
         self._joint_history.clear()
         self._risk_history.clear()
         self._current_hazard_history.clear()
+        self._stuck_monitor.reset()
 
     def step(
         self,
@@ -89,11 +158,65 @@ class SafeLoopController:
         proposed_action: Any,
         instruction: str | None = None,
     ) -> SafeLoopStepResult:
+        stuck_detected = bool(self.stuck_fallback and self._stuck_monitor.update(observation))
+        if self.step_index % int(self.prediction_period) != 0:
+            risk = self._risk_history[-1] if self._risk_history else RiskVector(0.0, 1.0, 0.0, 1.0)
+            current_body_probability, current_object_probability = (
+                self._current_hazard_history[-1] if self._current_hazard_history else (0.0, 0.0)
+            )
+            next_observation, reward, done, info = env.step(proposed_action)
+            info = dict(info or {})
+            info["safeloop"] = {
+                "intervention": Intervention.NOOP.value,
+                "risk": risk_info_dict(risk, current_body_probability, current_object_probability),
+                "recorded_waypoint": False,
+                "stuck_fallback": stuck_detected,
+                "decision": {
+                    "decider": "periodic",
+                    "period": int(self.prediction_period),
+                    "due": False,
+                    "selected_action": Intervention.NOOP.value,
+                },
+            }
+            self.step_index += 1
+            return SafeLoopStepResult(
+                observation=next_observation,
+                reward=float(reward),
+                done=bool(done),
+                info=info,
+                risk=risk,
+                intervention=Intervention.NOOP,
+                executed_nominal_action=True,
+            )
+
         prediction = self.predictor.predict(observation, proposed_action, instruction=instruction)
         risk, current_body_probability, current_object_probability = normalize_risk_prediction(prediction)
+        risk, current_body_probability = apply_stuck_fallback(
+            risk,
+            current_body_probability,
+            stuck_detected,
+        )
         self._joint_history.append(extract_robot_joint_vector(observation, proposed_action))
         self._risk_history.append(risk)
         self._current_hazard_history.append((current_body_probability, current_object_probability))
+
+        rollback_waypoint = None
+        rollback_max_age = (
+            self.stuck_rollback_target_max_age
+            if stuck_detected and self.stuck_rollback_target_max_age is not None
+            else self.rollback_target_max_age
+        )
+        if len(self.memory) > 0:
+            try:
+                rollback_waypoint = self.memory.select_rollback(
+                    current_step_index=self.step_index,
+                    safe_score_threshold=self.rollback_target_safe_score_threshold,
+                    max_safe_age=rollback_max_age,
+                    min_safe_age=self.rollback_target_min_age,
+                    require_safe=self.rollback_target_require_safe,
+                )
+            except IndexError:
+                rollback_waypoint = None
 
         intervention = call_decider(
             self.decider,
@@ -109,19 +232,17 @@ class SafeLoopController:
             current_hazard_history=list(self._current_hazard_history),
             current_body_probability=current_body_probability,
             current_object_probability=current_object_probability,
+            stuck_detected=stuck_detected,
+            rollback_target_available=rollback_waypoint is not None,
             max_steps=self.max_steps,
         )
         decision_info = getattr(self.decider, "last_decision_info", None)
 
         if intervention == Intervention.ROLLBACK:
             try:
-                waypoint = self.memory.select_rollback(
-                    current_step_index=self.step_index,
-                    safe_score_threshold=self.rollback_target_safe_score_threshold,
-                    max_safe_age=self.rollback_target_max_age,
-                    min_safe_age=self.rollback_target_min_age,
-                    require_safe=self.rollback_target_require_safe,
-                )
+                waypoint = rollback_waypoint
+                if waypoint is None:
+                    raise IndexError("no rollback target satisfies the configured safety and age constraints")
             except IndexError as exc:
                 self.last_rollback_step = self.step_index
                 self.step_index += 1
@@ -147,12 +268,27 @@ class SafeLoopController:
                     executed_nominal_action=False,
                 )
             rollback_observation, rollback_info = execute_rollback(env, waypoint, self.rollback_executor)
+            self._stuck_monitor.reset()
+            refreshed_rollback_anchor = False
+            if rollback_info.get("safe", True) is not False and rollback_info.get("reached", True) is not False:
+                anchor_metadata = dict(waypoint.metadata)
+                anchor_metadata["source"] = "rollback_anchor"
+                self.memory.record(
+                    step_index=self.step_index,
+                    state=capture_env_state(env),
+                    risk=waypoint.risk,
+                    metadata=anchor_metadata,
+                )
+                self.last_record_step = self.step_index
+                refreshed_rollback_anchor = True
             self.last_rollback_step = self.step_index
             self.step_index += 1
             safeloop_info = {
                 "intervention": intervention.value,
                 "rollback_step": waypoint.step_index,
                 "risk": risk_info_dict(risk, current_body_probability, current_object_probability),
+                "stuck_fallback": stuck_detected,
+                "refreshed_rollback_anchor": refreshed_rollback_anchor,
             }
             if decision_info is not None:
                 safeloop_info["decision"] = decision_info
@@ -187,6 +323,7 @@ class SafeLoopController:
             "intervention": intervention.value,
             "risk": risk_info_dict(risk, current_body_probability, current_object_probability),
             "recorded_waypoint": recorded_waypoint,
+            "stuck_fallback": stuck_detected,
         }
         if auto_recorded:
             info["safeloop"]["auto_recorded"] = True
@@ -407,6 +544,18 @@ def extract_robot_joint_vector(observation: Any, proposed_action: Any | None = N
         if action.size:
             return action
     return np.zeros(9, dtype=np.float32)
+
+
+def extract_robot_eef_position(observation: Any) -> np.ndarray | None:
+    if not isinstance(observation, dict):
+        return None
+    position = _array_from_first_key(
+        observation,
+        ("robot0_eef_pos", "eef_pos", "observation/eef_pos"),
+    )
+    if position is None or position.size < 3:
+        return None
+    return position.reshape(-1)[:3].astype(np.float32)
 
 
 def _array_from_first_key(observation: dict, keys: tuple[str, ...]) -> np.ndarray | None:

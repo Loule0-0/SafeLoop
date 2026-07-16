@@ -60,18 +60,23 @@ class WaypointMemory:
         if not self._items:
             raise IndexError("waypoint memory is empty")
         if current_step_index is not None:
+            age_eligible: list[Waypoint] = []
             candidates: list[tuple[float, int, Waypoint]] = []
             for waypoint in reversed(self._items):
                 age = int(current_step_index) - int(waypoint.step_index)
                 if age < int(min_safe_age) or age > int(max_safe_age):
                     continue
+                age_eligible.append(waypoint)
                 risk_score = _waypoint_risk_score(waypoint)
                 if risk_score <= float(safe_score_threshold):
                     candidates.append((risk_score, -int(waypoint.step_index), waypoint))
             if candidates:
                 return min(candidates, key=lambda item: (item[0], item[1]))[2]
-            if require_safe:
+            if age_eligible and not require_safe:
+                return max(age_eligible, key=lambda waypoint: int(waypoint.step_index))
+            if age_eligible:
                 raise IndexError("no mature low-risk waypoint is available")
+            raise IndexError("no waypoint satisfies the rollback age constraints")
         return self.latest()
 
     def clear(self) -> None:

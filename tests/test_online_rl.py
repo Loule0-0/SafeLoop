@@ -384,6 +384,12 @@ class OnlineRLTests(unittest.TestCase):
 
         self.assertFalse(rollback_gate_enabled(args))
 
+    def test_bc_schedule_can_continue_from_a_later_update(self):
+        from scripts.train_online_safeguard_decider import bc_coef_for_update
+
+        self.assertAlmostEqual(bc_coef_for_update(3, 8, 1.0, 0.8), 0.53125)
+        self.assertEqual(bc_coef_for_update(7, 8, 1.0, 0.8), 0.0)
+
     def test_asymmetric_policy_exports_actor_checkpoint(self):
         from safety_guard.online_rl import (
             AsymmetricActorCriticPolicy,

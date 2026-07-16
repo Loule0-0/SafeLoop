@@ -1,4 +1,4 @@
-from .controller import SafeLoopController, SafeLoopStepResult
+from .controller import ProprioceptiveStuckMonitor, SafeLoopController, SafeLoopStepResult
 from .decider import Intervention, RuleBasedDecider
 from .features import build_actor_features
 from .memory import Waypoint, WaypointMemory
@@ -12,6 +12,7 @@ __all__ = [
     "RuleBasedDecider",
     "SafeLoopController",
     "SafeLoopStepResult",
+    "ProprioceptiveStuckMonitor",
     "Waypoint",
     "WaypointMemory",
     "ActionNormRiskPredictor",

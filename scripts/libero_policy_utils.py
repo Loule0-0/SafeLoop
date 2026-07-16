@@ -15,6 +15,23 @@ if str(PROJECT_ROOT) not in sys.path:
 from safety_guard.compat import torch_load_compat
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
+POLICY_BACKENDS = ("pi0", "openvla-oft")
+
+
+def configure_egl_vendor() -> None:
+    if os.environ.get("MUJOCO_GL", "").lower() != "egl":
+        return
+    if "__EGL_VENDOR_LIBRARY_FILENAMES" in os.environ:
+        return
+    nvidia_libraries = (
+        Path("/usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0"),
+        Path("/usr/lib64/libEGL_nvidia.so.0"),
+        Path("/usr/local/nvidia/lib64/libEGL_nvidia.so.0"),
+    )
+    vendor_config = PROJECT_ROOT / "configs" / "runtime" / "10_nvidia.json"
+    if vendor_config.is_file() and any(path.exists() for path in nvidia_libraries):
+        os.environ["__EGL_VENDOR_LIBRARY_FILENAMES"] = str(vendor_config)
+        os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
 
 def env_path(name: str) -> Path | None:
@@ -23,6 +40,7 @@ def env_path(name: str) -> Path | None:
 
 
 def configure_paths(args: argparse.Namespace) -> None:
+    configure_egl_vendor()
     paths: list[Path] = [Path(args.project_root)]
     libero_root = getattr(args, "libero_root", None)
     openpi_root = getattr(args, "openpi_root", None)
@@ -82,6 +100,9 @@ def make_policy(args: argparse.Namespace):
 
         return websocket_client_policy.WebsocketClientPolicy(args.policy_host, args.policy_port)
 
+    if getattr(args, "policy_backend", "pi0") != "pi0":
+        raise ValueError("OpenVLA-OFT runs through --policy-mode websocket; in-process mode is pi0-only")
+
     if args.checkpoint_dir is None:
         raise ValueError("--checkpoint-dir or PI0_CHECKPOINT_DIR is required for in-process policy mode")
 
@@ -111,9 +132,24 @@ def preprocess_policy_images(obs: dict, resize_size: int):
     return img, wrist_img
 
 
-def policy_observation(obs: dict, task_description: str, resize_size: int) -> dict:
-    img, wrist_img = preprocess_policy_images(obs, resize_size)
-    return {
+def policy_observation(
+    obs: dict,
+    task_description: str,
+    resize_size: int,
+    *,
+    policy_backend: str = "pi0",
+    benchmark: str | None = None,
+) -> dict:
+    if policy_backend not in POLICY_BACKENDS:
+        raise ValueError(f"Unsupported policy backend: {policy_backend}")
+
+    if policy_backend == "openvla-oft":
+        img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
+        wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
+    else:
+        img, wrist_img = preprocess_policy_images(obs, resize_size)
+
+    observation = {
         "observation/image": img,
         "observation/wrist_image": wrist_img,
         "observation/state": np.concatenate(
@@ -125,6 +161,12 @@ def policy_observation(obs: dict, task_description: str, resize_size: int) -> di
         ),
         "prompt": str(task_description),
     }
+    if policy_backend == "openvla-oft":
+        if benchmark is None:
+            raise ValueError("benchmark is required for OpenVLA-OFT normalization-stat selection")
+        observation["policy/backend"] = policy_backend
+        observation["policy/benchmark"] = benchmark
+    return observation
 
 
 def current_observation(env) -> dict:

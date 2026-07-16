@@ -1,6 +1,7 @@
 {
   "release": "v56_24task_release",
   "paper": "SafeLoop: Risk-Aware Rollback for Vision-Language-Action Manipulation",
+  "seed_selects_init_state": true,
   "huggingface": {
     "weights_repo": "Jaqen0-0/SafeLoop",
     "dataset_repo": "Jaqen0-0/SafeLoop-Training-Data"
@@ -277,7 +278,7 @@
         }
       ]
     },
-    "pi0_baseline_reference": {
+    "base_policy_reference": {
       "summary": "Base-policy reference on the same 24 tasks and 16 seeds; SafeLoop is disabled only in this baseline profile.",
       "seeds": [
         0,

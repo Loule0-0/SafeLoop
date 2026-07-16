@@ -15,6 +15,27 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "release" / "v56_24task_eval.json"
 
 
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_config(path: Path) -> dict[str, Any]:
+    config = json.loads(path.read_text(encoding="utf-8"))
+    parent = config.pop("extends", None)
+    if parent is None:
+        return config
+    parent_path = Path(parent)
+    if not parent_path.is_absolute():
+        parent_path = path.parent / parent_path
+    return _deep_merge(_load_config(parent_path.resolve()), config)
+
+
 def _replace_placeholders(value: Any, context: dict[str, str]) -> Any:
     if isinstance(value, str):
         for key, replacement in context.items():
@@ -75,10 +96,14 @@ def _build_command(
         "mode": entry["mode"],
         "output-dir": str(output_root / _entry_name(entry, seed)),
     })
+    if config.get("seed_selects_init_state", False):
+        args["init-state-start"] = seed
     if entry["mode"] == "rl":
         checkpoints = config["checkpoints"]
         args["qwen-head-path"] = str(Path(context["weights_dir"]) / checkpoints[entry["head"]])
-        args["decision-checkpoint"] = str(Path(context["weights_dir"]) / checkpoints["decision"])
+        args["decision-checkpoint"] = context.get("decision_checkpoint") or str(
+            Path(context["weights_dir"]) / checkpoints["decision"]
+        )
     else:
         args.pop("predictor", None)
         args.pop("qwen-model-path", None)
@@ -97,16 +122,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--profile", default="safeloop_all")
     parser.add_argument("--model-dir", type=Path, required=True)
     parser.add_argument("--weights-dir", type=Path, required=True)
+    parser.add_argument("--decision-checkpoint", type=Path)
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--libero-root", type=Path)
     parser.add_argument("--openpi-root", type=Path)
     parser.add_argument("--checkpoint-dir", type=Path)
     parser.add_argument("--policy-host", default="127.0.0.1")
     parser.add_argument("--policy-port", type=int, default=8000)
+    parser.add_argument("--seeds", nargs="+", type=int)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
-    config = json.loads(args.config.read_text(encoding="utf-8"))
+    config = _load_config(args.config.resolve())
     profiles = config["profiles"]
     if args.profile not in profiles:
         raise SystemExit(f"unknown profile {args.profile!r}; choices: {', '.join(sorted(profiles))}")
@@ -116,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         "weights_dir": str(args.weights_dir),
         "policy_host": args.policy_host,
         "policy_port": str(args.policy_port),
+        "decision_checkpoint": str(args.decision_checkpoint) if args.decision_checkpoint else "",
     }
     env = os.environ.copy()
     if args.libero_root:
@@ -127,7 +155,8 @@ def main(argv: list[str] | None = None) -> int:
 
     profile = profiles[args.profile]
     for entry in profile["entries"]:
-        for seed in _entry_seeds(config, profile, entry):
+        seeds = args.seeds if args.seeds is not None else _entry_seeds(config, profile, entry)
+        for seed in seeds:
             command = _build_command(config, entry, seed, context, args.output_root)
             print(" ".join(command))
             if not args.dry_run:
