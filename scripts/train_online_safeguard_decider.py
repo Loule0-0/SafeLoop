@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import dataclasses
 import json
 import os
 import sys
@@ -25,20 +26,23 @@ from safety_guard.controller import (
 from safety_guard.decider import Intervention, RuleBasedDecider
 from safety_guard.libero_motion import MotionPlanningRollbackExecutor
 from safety_guard.libero_oracle import LiberoHazardOracle
-from safety_guard.memory import WaypointMemory, _waypoint_risk_score
+from safety_guard.memory import WaypointMemory, _waypoint_risk_score, initial_anchor_rollback_allowed
 from safety_guard.online_rl import (
     AsymmetricPPOConfig,
     AsymmetricPPOTrainer,
     OnlineRewardConfig,
+    OnlineStepSignals,
     actor_checkpoint_to_asymmetric,
     batch_from_online_records,
     export_actor_checkpoint,
+    mark_online_episode_terminal,
     online_hazard_score,
     online_safeloop_reward,
+    noop_outcome_credit,
     privileged_feature_dim,
     rollback_outcome_credit,
     rollback_terminal_credit,
-    sample_action_with_rollback_exploration,
+    sample_action_with_intervention_exploration,
 )
 from safety_guard.predictors import ActionNormRiskPredictor, ConstantRiskPredictor
 from safety_guard.qwen_multitask import (
@@ -103,17 +107,23 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--qwen-dtype", default="float32")
     parser.add_argument("--qwen-tau", "--future-window", dest="qwen_tau", type=int, default=50)
     parser.add_argument("--initial-decision-checkpoint", "--init-checkpoint", dest="initial_decision_checkpoint", type=Path, required=True)
+    parser.add_argument("--initial-actor-logit-scale", type=float, default=1.0)
     parser.add_argument("--decision-device", default="cpu")
     parser.add_argument("--decision-period", "--decision-interval", dest="decision_period", type=int, default=5)
     parser.add_argument("--record-probability", type=float, default=0.12)
     parser.add_argument("--record-max-risk-score", type=float, default=1.01)
     parser.add_argument("--record-max-current-body-probability", type=float)
     parser.add_argument("--record-max-current-object-probability", type=float)
+    parser.add_argument("--record-initial-safe-anchor", action="store_true")
+    parser.add_argument("--initial-anchor-rollback-min-current-body-probability", type=float)
+    parser.add_argument("--initial-anchor-rollback-min-current-object-probability", type=float)
     parser.add_argument("--rollback-probability", type=float, default=0.55)
     parser.add_argument("--rollback-tth", type=float, default=0.35)
     parser.add_argument("--min-record-interval", type=int, default=30)
     parser.add_argument("--rollback-cooldown", type=int, default=15)
     parser.add_argument("--rollback-exploration-probability", type=float, default=0.0)
+    parser.add_argument("--noop-exploration-probability", type=float, default=0.0)
+    parser.add_argument("--noop-probe-blocks-rollback", action="store_true")
     parser.add_argument("--record-exploration-probability", type=float, default=0.0)
     parser.add_argument("--min-rollback-step", type=int, default=0)
     parser.add_argument("--max-rollbacks-per-episode", type=int)
@@ -143,15 +153,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rollback-target-safe-score-threshold", type=float, default=0.6)
     parser.add_argument("--rollback-target-min-age", type=int, default=30)
     parser.add_argument("--rollback-target-max-age", type=int, default=120)
+    parser.add_argument("--rollback-target-prefer-recent-safe", action="store_true")
     parser.add_argument("--updates", type=int, default=4)
     parser.add_argument("--update-start-index", type=int, default=0)
     parser.add_argument("--total-schedule-updates", type=int)
     parser.add_argument("--episodes-per-update", "--episodes-per-task", dest="episodes_per_update", type=int, default=1)
     parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--actor-lr", type=float)
+    parser.add_argument("--critic-lr", type=float)
+    parser.add_argument("--entropy-coef", type=float, default=0.01)
     parser.add_argument("--bc-coef", type=float, default=1.0)
+    parser.add_argument("--class-balanced-bc", action="store_true")
     parser.add_argument("--bc-anneal-fraction", type=float, default=0.3)
     parser.add_argument("--hazard-penalty", type=float, default=-1.0)
+    parser.add_argument("--hazard-onset-penalty", type=float, default=0.0)
+    parser.add_argument("--predictor-onset-penalty", type=float, default=0.0)
+    parser.add_argument("--predictor-realized-body-threshold", type=float, default=0.99)
+    parser.add_argument("--predictor-realized-object-threshold", type=float, default=0.99)
     parser.add_argument("--body-hazard-penalty", type=float, default=0.0)
     parser.add_argument("--object-hazard-penalty", type=float, default=0.0)
     parser.add_argument("--stuck-hazard-penalty", type=float, default=0.0)
@@ -159,10 +178,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--rollback-failure-penalty", type=float, default=-0.25)
     parser.add_argument("--rollback-rendered-frame-penalty", type=float, default=0.0)
     parser.add_argument("--rollback-resolved-bonus", type=float, default=0.0)
+    parser.add_argument("--rollback-preemptive-bonus", type=float, default=0.0)
     parser.add_argument("--rollback-unresolved-penalty", type=float, default=0.0)
     parser.add_argument("--rollback-episode-success-bonus", type=float, default=0.0)
     parser.add_argument("--rollback-episode-failure-penalty", type=float, default=0.0)
     parser.add_argument("--rollback-effect-horizon", type=int, default=0)
+    parser.add_argument("--noop-effect-horizon", type=int, default=0)
+    parser.add_argument("--noop-safe-bonus", type=float, default=0.0)
+    parser.add_argument("--noop-hazard-penalty", type=float, default=0.0)
     parser.add_argument("--rollback-count-scale", type=float, default=0.25)
     parser.add_argument("--record-penalty", type=float, default=-0.0005)
     parser.add_argument("--step-penalty", type=float, default=-1e-5)
@@ -174,6 +197,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--qwen-rollout-prehazard-stride", type=int, default=0)
     parser.add_argument("--qwen-rollout-run-tag")
     parser.add_argument("--decision-debug-jsonl-out", type=Path)
+    parser.add_argument("--save-online-records", action="store_true")
     parser.add_argument("--video-dir", type=Path)
     parser.add_argument("--out-dir", "--output-dir", dest="out_dir", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -222,6 +246,7 @@ def cool_down_elapsed(step_index: int, previous_step: int | None, interval: int)
 def reward_config_from_args(args: argparse.Namespace) -> OnlineRewardConfig:
     return OnlineRewardConfig(
         hazard_penalty=args.hazard_penalty,
+        hazard_onset_penalty=args.hazard_onset_penalty,
         body_hazard_penalty=args.body_hazard_penalty,
         object_hazard_penalty=args.object_hazard_penalty,
         stuck_hazard_penalty=args.stuck_hazard_penalty,
@@ -229,14 +254,58 @@ def reward_config_from_args(args: argparse.Namespace) -> OnlineRewardConfig:
         rollback_failure_penalty=args.rollback_failure_penalty,
         rollback_rendered_frame_penalty=args.rollback_rendered_frame_penalty,
         rollback_resolved_bonus=args.rollback_resolved_bonus,
+        rollback_preemptive_bonus=args.rollback_preemptive_bonus,
         rollback_unresolved_penalty=args.rollback_unresolved_penalty,
         rollback_episode_success_bonus=args.rollback_episode_success_bonus,
         rollback_episode_failure_penalty=args.rollback_episode_failure_penalty,
+        noop_safe_bonus=args.noop_safe_bonus,
+        noop_hazard_penalty=args.noop_hazard_penalty,
         rollback_count_scale=args.rollback_count_scale,
         record_penalty=args.record_penalty,
         step_penalty=args.step_penalty,
         completion_reward=args.completion_reward,
         task_reward_scale=args.task_reward_scale,
+    )
+
+
+def augment_training_signals(
+    signals: OnlineStepSignals,
+    *,
+    monitor_stuck: bool,
+    previous_any_hazard: bool,
+) -> OnlineStepSignals:
+    stuck_hazard = bool(signals.stuck_hazard or monitor_stuck)
+    any_hazard = bool(signals.body_hazard or signals.object_hazard or stuck_hazard)
+    return dataclasses.replace(
+        signals,
+        stuck_hazard=stuck_hazard,
+        hazard_event=bool(any_hazard and not previous_any_hazard),
+    )
+
+
+def scale_actor_logits(decision_policy, scale: float) -> None:
+    scale = float(scale)
+    if scale <= 0.0:
+        raise ValueError("--initial-actor-logit-scale must be positive")
+    if scale == 1.0:
+        return
+    with torch.no_grad():
+        decision_policy.actor.weight.mul_(scale)
+        decision_policy.actor.bias.mul_(scale)
+
+
+def predictor_proxy_hazard(
+    current_body: float,
+    current_object: float,
+    stuck_detected: bool,
+    *,
+    body_threshold: float = 0.99,
+    object_threshold: float = 0.99,
+) -> bool:
+    return bool(
+        stuck_detected
+        or float(current_body) >= float(body_threshold)
+        or float(current_object) >= float(object_threshold)
     )
 
 
@@ -387,6 +456,7 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
     if hasattr(predictor, "reset"):
         predictor.reset()
     np.random.seed(args.seed + episode_id)
+    torch.manual_seed(args.seed + episode_id)
     env.seed(args.seed + episode_id)
     env.reset()
     init_index = (args.init_state_start + episode_id) % len(init_states)
@@ -424,9 +494,19 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
     rollback_rendered_frames = 0
     rollback_opportunities = 0
     rollback_explorations = 0
+    noop_explorations = 0
+    noop_probe_blocked_opportunities = 0
     record_explorations = 0
+    initial_safe_anchors = 0
     rollback_outcome_credits = 0.0
+    rollback_preemptive_credits = 0.0
     rollback_terminal_credits = 0.0
+    noop_outcome_credits = 0.0
+    noop_safe_labels = 0
+    noop_hazard_labels = 0
+    noop_censored_labels = 0
+    predictor_onset_events = 0
+    predictor_onset_credits = 0.0
     rollback_record_indices: list[int] = []
     rollback_events: list[dict] = []
     pending_rollback_record_index: int | None = None
@@ -434,6 +514,8 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
     pending_rollback_observed_steps = 0
     pending_rollback_pre_hazard_steps = 0
     pending_rollback_pre_observed_steps = 0
+    pending_rollback_preemptive = False
+    pending_noop_outcomes: list[dict] = []
     recent_hazard_outcomes: collections.deque[float] = collections.deque(
         maxlen=max(1, int(args.rollback_effect_horizon))
     )
@@ -441,6 +523,8 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
     credited_interval_reward = 0.0
     credited_interval_hazard_steps = 0
     success = False
+    previous_training_hazard = False
+    previous_predictor_hazard = False
     suite_max_steps = max_steps_for_suite(args.benchmark)
     max_steps = int(args.max_rollout_steps) if args.allow_extended_rollout else min(args.max_rollout_steps, suite_max_steps)
     reward_config = reward_config_from_args(args)
@@ -451,7 +535,9 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
         nonlocal pending_rollback_observed_steps
         nonlocal pending_rollback_pre_hazard_steps
         nonlocal pending_rollback_pre_observed_steps
+        nonlocal pending_rollback_preemptive
         nonlocal rollback_outcome_credits
+        nonlocal rollback_preemptive_credits
         nonlocal reward_sum
         if pending_rollback_record_index is None:
             return
@@ -460,6 +546,7 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
             observed_steps=pending_rollback_observed_steps,
             pre_rollback_hazard_steps=pending_rollback_pre_hazard_steps,
             pre_observed_steps=pending_rollback_pre_observed_steps,
+            preemptive_warning=pending_rollback_preemptive,
             config=reward_config,
         )
         if credit and 0 <= pending_rollback_record_index < len(records):
@@ -467,6 +554,8 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
                 float(records[pending_rollback_record_index]["reward"]) + float(credit)
             )
             rollback_outcome_credits += float(credit)
+            if pending_rollback_preemptive:
+                rollback_preemptive_credits += float(credit)
             reward_sum += float(credit)
         if 0 <= pending_rollback_record_index < len(records):
             outcome_teacher_action = None
@@ -484,11 +573,85 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
                 records[pending_rollback_record_index]["rollback_post_hazard_steps"] = float(
                     pending_rollback_hazard_steps
                 )
+                records[pending_rollback_record_index]["rollback_preemptive"] = bool(
+                    pending_rollback_preemptive
+                )
         pending_rollback_record_index = None
         pending_rollback_hazard_steps = 0
         pending_rollback_observed_steps = 0
         pending_rollback_pre_hazard_steps = 0
         pending_rollback_pre_observed_steps = 0
+        pending_rollback_preemptive = False
+
+    def prepare_reward_signals(signals: OnlineStepSignals, *, monitor_stuck: bool) -> OnlineStepSignals:
+        nonlocal previous_training_hazard
+        prepared = augment_training_signals(
+            signals,
+            monitor_stuck=monitor_stuck,
+            previous_any_hazard=previous_training_hazard,
+        )
+        previous_training_hazard = prepared.any_hazard
+        return prepared
+
+    def finish_noop_outcome(item: dict, *, censored: bool = False) -> None:
+        nonlocal noop_outcome_credits
+        nonlocal noop_safe_labels
+        nonlocal noop_hazard_labels
+        nonlocal noop_censored_labels
+        nonlocal reward_sum
+        record_index = int(item["record_index"])
+        if not 0 <= record_index < len(records):
+            return
+        if censored:
+            records[record_index]["teacher_action"] = -1
+            records[record_index]["noop_outcome_censored"] = True
+            noop_censored_labels += 1
+            return
+        hazard_steps = float(item["hazard_steps"])
+        observed_steps = int(item["observed_steps"])
+        credit = noop_outcome_credit(hazard_steps, observed_steps, config=reward_config)
+        records[record_index]["reward"] = float(records[record_index]["reward"]) + float(credit)
+        records[record_index]["teacher_action"] = int(
+            ThreeAction.ROLLBACK if hazard_steps > 0.0 else ThreeAction.NOOP
+        )
+        records[record_index]["noop_outcome_credit"] = float(credit)
+        records[record_index]["noop_outcome_hazard_steps"] = float(hazard_steps)
+        records[record_index]["noop_outcome_observed_steps"] = int(observed_steps)
+        noop_outcome_credits += float(credit)
+        noop_hazard_labels += int(hazard_steps > 0.0)
+        noop_safe_labels += int(hazard_steps <= 0.0)
+        reward_sum += float(credit)
+
+    def observe_pending_noops(signals: OnlineStepSignals) -> None:
+        if not pending_noop_outcomes:
+            return
+        horizon = max(1, int(args.noop_effect_horizon))
+        hazard_score = float(online_hazard_score(signals, reward_config))
+        completed = []
+        for item in pending_noop_outcomes:
+            item["observed_steps"] += 1
+            item["hazard_steps"] += hazard_score
+            if item["hazard_steps"] > 0.0 or item["observed_steps"] >= horizon or signals.success:
+                completed.append(item)
+        for item in completed:
+            finish_noop_outcome(item)
+            pending_noop_outcomes.remove(item)
+
+    def censor_pending_noops() -> None:
+        for item in list(pending_noop_outcomes):
+            finish_noop_outcome(item, censored=True)
+            pending_noop_outcomes.remove(item)
+
+    def finish_pending_noops() -> None:
+        horizon = max(1, int(args.noop_effect_horizon))
+        for item in list(pending_noop_outcomes):
+            complete = (
+                float(item["hazard_steps"]) > 0.0
+                or int(item["observed_steps"]) >= horizon
+                or success
+            )
+            finish_noop_outcome(item, censored=not complete)
+            pending_noop_outcomes.remove(item)
 
     def observe_post_rollback(signals) -> None:
         nonlocal pending_rollback_hazard_steps
@@ -509,19 +672,34 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
             continue
         step_index = step - args.num_steps_wait
         if not action_plan:
-            action_chunk = base_policy.infer(
-                policy_observation(
-                    obs,
-                    task.language,
-                    args.resize_size,
-                    policy_backend=args.policy_backend,
-                    benchmark=args.benchmark,
-                )
-            )["actions"]
+            policy_input = policy_observation(
+                obs,
+                task.language,
+                args.resize_size,
+                policy_backend=args.policy_backend,
+                benchmark=args.benchmark,
+            )
+            if args.policy_backend == "openvla-oft":
+                policy_input["policy/episode_seed"] = int(args.seed + episode_id)
+                policy_input["policy/reset"] = step_index == 0
+            action_chunk = base_policy.infer(policy_input)["actions"]
             if len(action_chunk) < args.replan_steps:
                 raise RuntimeError(f"policy returned {len(action_chunk)} actions, need {args.replan_steps}")
             action_plan.extend(np.asarray(action_chunk[: args.replan_steps]))
         proposed_action = action_plan.popleft()
+        if args.record_initial_safe_anchor and step_index == 0 and len(memory) == 0:
+            memory.record(
+                step_index=0,
+                state=capture_env_state(env),
+                risk=None,
+                metadata={
+                    "source": "initial_safe_anchor",
+                    "task_id": int(args.task_id),
+                    "episode_id": int(episode_id),
+                },
+            )
+            last_record_step = 0
+            initial_safe_anchors += 1
         stuck_detected = bool(args.stuck_fallback and stuck_monitor.update(obs))
         pre_action_signals = None
         if args.qwen_rollout_jsonl_out is not None:
@@ -549,7 +727,9 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
             obs, task_reward, done, _ = env.step(proposed_action.tolist())
             success = bool(done or env.check_success())
             signals = oracle.read(success=success, task_reward=float(task_reward))
+            signals = prepare_reward_signals(signals, monitor_stuck=stuck_detected)
             observe_post_rollback(signals)
+            observe_pending_noops(signals)
             step_reward = online_safeloop_reward(
                 signals,
                 Intervention.NOOP,
@@ -575,6 +755,23 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
         prediction = predictor.predict(obs, proposed_action.tolist(), instruction=task.language)
         risk, current_body, current_object = normalize_risk_prediction(prediction)
         risk, current_body = apply_stuck_fallback(risk, current_body, stuck_detected)
+        proxy_hazard = predictor_proxy_hazard(
+            current_body,
+            current_object,
+            stuck_detected,
+            body_threshold=args.predictor_realized_body_threshold,
+            object_threshold=args.predictor_realized_object_threshold,
+        )
+        proxy_onset = bool(proxy_hazard and not previous_predictor_hazard)
+        previous_predictor_hazard = proxy_hazard
+        if proxy_onset:
+            predictor_onset_events += 1
+            if records and float(args.predictor_onset_penalty) != 0.0:
+                credit = float(args.predictor_onset_penalty)
+                records[-1]["reward"] = float(records[-1]["reward"]) + credit
+                records[-1]["predictor_onset_credit"] = credit
+                reward_sum += credit
+                predictor_onset_credits += credit
         joint_history.append(extract_robot_joint_vector(obs, proposed_action))
         risk_history.append(risk)
         current_history.append((current_body, current_object))
@@ -584,7 +781,7 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
             and record_allowed_by_gate(args, risk, current_body, current_object)
         )
         rollback_waypoint = None
-        rollback_gate_open = (
+        raw_rollback_gate_open = (
             len(memory) > 0
             and cool_down_elapsed(step_index, last_rollback_step, args.rollback_cooldown)
             and rollback_allowed_by_gate(
@@ -597,6 +794,9 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
                 stuck_detected=stuck_detected,
             )
         )
+        noop_probe_active = bool(args.noop_probe_blocks_rollback and pending_noop_outcomes)
+        rollback_gate_open = bool(raw_rollback_gate_open and not noop_probe_active)
+        noop_probe_blocked_opportunities += int(raw_rollback_gate_open and noop_probe_active)
         if rollback_gate_open:
             try:
                 rollback_target_max_age = (
@@ -610,7 +810,21 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
                     min_safe_age=args.rollback_target_min_age,
                     max_safe_age=rollback_target_max_age,
                     require_safe=True,
+                    prefer_recent_safe=args.rollback_target_prefer_recent_safe,
                 )
+                if not initial_anchor_rollback_allowed(
+                    rollback_waypoint,
+                    current_body_probability=current_body,
+                    current_object_probability=current_object,
+                    stuck_detected=stuck_detected,
+                    min_current_body_probability=(
+                        args.initial_anchor_rollback_min_current_body_probability
+                    ),
+                    min_current_object_probability=(
+                        args.initial_anchor_rollback_min_current_object_probability
+                    ),
+                ):
+                    rollback_waypoint = None
             except IndexError:
                 rollback_waypoint = None
         can_rollback = rollback_waypoint is not None
@@ -630,13 +844,15 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
             history_length=3,
         )
         action_probabilities = masked_action_probabilities(decision_policy, actor_features, action_mask)
-        action, old_logprob, explored_rollback = sample_action_with_rollback_exploration(
+        action, old_logprob, exploration = sample_action_with_intervention_exploration(
             decision_policy,
             actor_features,
             action_mask=action_mask,
             rollback_exploration_probability=args.rollback_exploration_probability,
+            noop_exploration_probability=args.noop_exploration_probability,
         )
-        rollback_explorations += int(explored_rollback)
+        explored_rollback = exploration == "rollback"
+        explored_noop = exploration == "noop"
         explored_record = False
         record_probability = min(max(float(args.record_exploration_probability), 0.0), 1.0)
         if can_record and record_probability > 0.0 and float(np.random.random()) < record_probability:
@@ -656,6 +872,10 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
             action = ThreeAction.RECORD
             explored_record = True
             record_explorations += 1
+            explored_rollback = False
+            explored_noop = False
+        rollback_explorations += int(explored_rollback)
+        noop_explorations += int(explored_noop)
         teacher_intervention = teacher.decide(
             risk=risk,
             memory=memory,
@@ -674,12 +894,15 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
                 "rollback_count": int(rollback_count),
                 "can_record": bool(can_record),
                 "can_rollback": bool(can_rollback),
+                "noop_probe_active": bool(noop_probe_active),
+                "noop_probe_blocked_rollback": bool(raw_rollback_gate_open and noop_probe_active),
                 "action_mask": [bool(item) for item in action_mask],
                 "action": int(action),
                 "intervention": intervention.value,
                 "executed_rollback": bool(intervention == Intervention.ROLLBACK and can_rollback),
                 "stuck_fallback": bool(stuck_detected),
                 "explored_rollback": bool(explored_rollback),
+                "explored_noop": bool(explored_noop),
                 "explored_record": bool(explored_record),
                 "action_probabilities": action_probabilities,
                 "teacher_intervention": teacher_intervention.value,
@@ -701,6 +924,7 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
         rollback_motion_info: dict = {}
         rollback_pre_hazard_steps = float(sum(recent_hazard_outcomes))
         rollback_pre_observed_steps = int(len(recent_hazard_outcomes))
+        rollback_preemptive = bool(not stuck_detected and not previous_training_hazard)
 
         if intervention == Intervention.ROLLBACK and can_rollback:
             if args.qwen_rollout_jsonl_out is not None:
@@ -718,6 +942,7 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
                     )
                 )
             finish_pending_rollback_credit()
+            censor_pending_noops()
             waypoint = rollback_waypoint
             if waypoint is None:
                 waypoint = memory.select_rollback(
@@ -726,6 +951,7 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
                     min_safe_age=args.rollback_target_min_age,
                     max_safe_age=args.rollback_target_max_age,
                     require_safe=True,
+                    prefer_recent_safe=args.rollback_target_prefer_recent_safe,
                 )
             rollback_target_step = int(waypoint.step_index)
             rollback_target_age = int(step_index) - int(waypoint.step_index)
@@ -787,6 +1013,12 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
 
         success = bool(done or env.check_success())
         signals = oracle.read(success=success, task_reward=float(task_reward))
+        executed_rollback = bool(intervention == Intervention.ROLLBACK and can_rollback)
+        signals = prepare_reward_signals(
+            signals,
+            monitor_stuck=bool(stuck_detected and not executed_rollback),
+        )
+        observe_pending_noops(signals)
         if args.qwen_rollout_jsonl_out is not None and intervention == Intervention.ROLLBACK and can_rollback:
             qwen_frame_history.append(live_observation_to_frame(obs))
             qwen_rollout_samples.append(
@@ -829,13 +1061,37 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
                 "done": bool(success),
                 "action_mask": action_mask,
                 "teacher_action": int(INTERVENTION_TO_ACTION[teacher_intervention]),
+                "ppo_weight": 0.0 if (explored_rollback or explored_noop or explored_record) else 1.0,
                 "rollback_target_step": rollback_target_step,
                 "rollback_target_age": rollback_target_age,
                 "rollback_target_risk_score": rollback_target_risk_score,
                 "rollback_rendered_frames": int(rendered_frames),
                 "rollback_failed": bool(rollback_failed),
+                "task_id": int(args.task_id),
+                "episode_id": int(episode_id),
+                "init_state_index": int(init_index),
+                "step_index": int(step_index),
+                "can_record": bool(can_record),
+                "can_rollback": bool(can_rollback),
+                "explored_rollback": bool(explored_rollback),
+                "explored_noop": bool(explored_noop),
+                "explored_record": bool(explored_record),
             }
         )
+        if (
+            intervention == Intervention.NOOP
+            and can_rollback
+            and int(args.noop_effect_horizon) > 0
+        ):
+            item = {
+                "record_index": len(records) - 1,
+                "hazard_steps": float(online_hazard_score(signals, reward_config)),
+                "observed_steps": 1,
+            }
+            if item["hazard_steps"] > 0.0 or signals.success or int(args.noop_effect_horizon) <= 1:
+                finish_noop_outcome(item)
+            else:
+                pending_noop_outcomes.append(item)
         if (
             intervention == Intervention.ROLLBACK
             and can_rollback
@@ -847,6 +1103,7 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
             pending_rollback_observed_steps = 0
             pending_rollback_pre_hazard_steps = rollback_pre_hazard_steps
             pending_rollback_pre_observed_steps = rollback_pre_observed_steps
+            pending_rollback_preemptive = rollback_preemptive
         if intervention == Intervention.ROLLBACK and can_rollback:
             rollback_record_indices.append(len(records) - 1)
         interventions[intervention.value] += 1
@@ -860,6 +1117,7 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
             break
 
     finish_pending_rollback_credit()
+    finish_pending_noops()
     if args.qwen_rollout_jsonl_out is not None and qwen_rollout_samples:
         append_prehazard_rollout_samples(
             qwen_rollout_samples,
@@ -892,6 +1150,7 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
                             records[record_index]["teacher_action"] = int(ThreeAction.NOOP)
                     rollback_terminal_credits += float(terminal_credit)
                     reward_sum += float(terminal_credit)
+    mark_online_episode_terminal(records)
     return records, {
         "task": task.name,
         "task_id": args.task_id,
@@ -910,9 +1169,19 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
         "rollback_rendered_frames": int(rollback_rendered_frames),
         "rollback_opportunities": int(rollback_opportunities),
         "rollback_explorations": int(rollback_explorations),
+        "noop_explorations": int(noop_explorations),
+        "noop_probe_blocked_opportunities": int(noop_probe_blocked_opportunities),
         "record_explorations": int(record_explorations),
+        "initial_safe_anchors": int(initial_safe_anchors),
         "rollback_outcome_credits": float(rollback_outcome_credits),
+        "rollback_preemptive_credits": float(rollback_preemptive_credits),
         "rollback_terminal_credits": float(rollback_terminal_credits),
+        "noop_outcome_credits": float(noop_outcome_credits),
+        "noop_safe_labels": int(noop_safe_labels),
+        "noop_hazard_labels": int(noop_hazard_labels),
+        "noop_censored_labels": int(noop_censored_labels),
+        "predictor_onset_events": int(predictor_onset_events),
+        "predictor_onset_credits": float(predictor_onset_credits),
         "rollback_events": rollback_events,
     }
 
@@ -936,9 +1205,17 @@ def main() -> None:
         critic_dim=critic_dim,
         device=args.decision_device,
     )
+    scale_actor_logits(decision_policy, args.initial_actor_logit_scale)
     trainer = AsymmetricPPOTrainer(
         decision_policy,
-        AsymmetricPPOConfig(learning_rate=args.lr, bc_coef=args.bc_coef),
+        AsymmetricPPOConfig(
+            learning_rate=args.lr,
+            actor_learning_rate=args.actor_lr,
+            critic_learning_rate=args.critic_lr,
+            entropy_coef=args.entropy_coef,
+            bc_coef=args.bc_coef,
+            class_balanced_bc=args.class_balanced_bc,
+        ),
     )
     update_end_index = args.update_start_index + args.updates
     total_schedule_updates = args.total_schedule_updates or update_end_index
@@ -973,6 +1250,8 @@ def main() -> None:
                     update_reports.append(report)
             finally:
                 env.close()
+        if args.save_online_records:
+            torch.save(update_records, args.out_dir / f"online_records_update{update_index:03d}.pt")
         batch = batch_from_online_records(update_records)
         coef = bc_coef_for_update(update_index, total_schedule_updates, args.bc_coef, args.bc_anneal_fraction)
         history = trainer.update(batch, epochs=args.ppo_epochs, bc_coef=coef)
@@ -981,6 +1260,7 @@ def main() -> None:
         metrics = {
             "update": update_index,
             "records": len(update_records),
+            "episode_boundaries": int(sum(bool(item.get("done", False)) for item in update_records)),
             "bc_coef": coef,
             "checkpoint": str(checkpoint),
             "ppo_last": history[-1] if history else {},
@@ -997,9 +1277,23 @@ def main() -> None:
             "rollback_rendered_frames": int(sum(item["rollback_rendered_frames"] for item in update_reports)),
             "rollback_opportunities": int(sum(item["rollback_opportunities"] for item in update_reports)),
             "rollback_explorations": int(sum(item["rollback_explorations"] for item in update_reports)),
+            "noop_explorations": int(sum(item.get("noop_explorations", 0) for item in update_reports)),
+            "noop_probe_blocked_opportunities": int(
+                sum(item.get("noop_probe_blocked_opportunities", 0) for item in update_reports)
+            ),
             "record_explorations": int(sum(item.get("record_explorations", 0) for item in update_reports)),
+            "initial_safe_anchors": int(sum(item.get("initial_safe_anchors", 0) for item in update_reports)),
             "rollback_outcome_credits": float(sum(item["rollback_outcome_credits"] for item in update_reports)),
+            "rollback_preemptive_credits": float(
+                sum(item.get("rollback_preemptive_credits", 0.0) for item in update_reports)
+            ),
             "rollback_terminal_credits": float(sum(item["rollback_terminal_credits"] for item in update_reports)),
+            "noop_outcome_credits": float(sum(item.get("noop_outcome_credits", 0.0) for item in update_reports)),
+            "noop_safe_labels": int(sum(item.get("noop_safe_labels", 0) for item in update_reports)),
+            "noop_hazard_labels": int(sum(item.get("noop_hazard_labels", 0) for item in update_reports)),
+            "noop_censored_labels": int(sum(item.get("noop_censored_labels", 0) for item in update_reports)),
+            "predictor_onset_events": int(sum(item.get("predictor_onset_events", 0) for item in update_reports)),
+            "predictor_onset_credits": float(sum(item.get("predictor_onset_credits", 0.0) for item in update_reports)),
             "interventions": {
                 key: int(sum(item["interventions"][key] for item in update_reports))
                 for key in ("noop", "record", "rollback")
@@ -1019,6 +1313,7 @@ def main() -> None:
                         "hazard_steps",
                         "interventions",
                         "rollback_explorations",
+                        "noop_explorations",
                         "rollback_opportunities",
                         "checkpoint",
                     )

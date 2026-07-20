@@ -332,7 +332,7 @@ CUDA_VISIBLE_DEVICES=1 python scripts/run_release_decider_training.py \
   --policy-port 8001
 ```
 
-This recipe uses complete 520-step LIBERO-10 episodes. Its rollback gate suppresses interventions during active object contact, requires a low-risk waypoint from the recent 45-160-step window, and includes record exploration so the learned policy has usable rollback anchors.
+This recipe uses complete 400-step episodes from the seven paper LIBERO-90 tasks. It trains the policy-specific actor and asymmetric critic for two PPO updates with class-balanced behavior cloning and high rollback exploration. The selected `update001` actor is deployed behind stricter predictor gates and a recent-safe-anchor filter; the predictor weights remain unchanged. Following a rollback, the default OpenVLA-OFT deployment perturbs only the next arm-action chunk with a small, seed-reproducible, decaying offset so replanning can leave the failed trajectory while paired evaluations remain reproducible.
 
 ---
 
@@ -352,7 +352,7 @@ python scripts/run_release_24task_eval.py \
 
 The task list and seed list are stored in `configs/release/v56_24task_eval.json`. Each seed also selects the matching LIBERO initial-state index, so the default profile evaluates 16 seeds and 16 initial states per task. The default profile is `safeloop_all`; the baseline-only comparison is available as `--profile base_policy_reference`. Use `--seeds 0` for a 24-task smoke test without changing the release config.
 
-The OpenVLA-OFT matrix keeps the same 24 tasks and 16 seeds while switching to its eight-action horizon and policy-specific decider. The public combined OpenVLA-OFT checkpoint natively provides statistics for the 17 selected Spatial, Object, Goal, and LIBERO-10 tasks. The seven LIBERO-90 entries are retained as explicitly out-of-suite tests through the documented normalization fallback and should be reported separately from native-suite results.
+The OpenVLA-OFT matrix keeps the same 24 tasks and 16 seeds while switching to its eight-action horizon and policy-specific decider. SafeLoop is enabled for every matrix entry, and each rollout is capped at its suite's full horizon. The public combined OpenVLA-OFT checkpoint natively provides statistics for the 17 selected Spatial, Object, Goal, and LIBERO-10 tasks. The seven LIBERO-90 entries are retained as explicitly out-of-suite tests through the documented normalization fallback and should be reported separately from native-suite results.
 
 ```bash
 python scripts/run_release_24task_eval.py \

@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -270,6 +271,118 @@ class SafeLoopCoreTests(unittest.TestCase):
         self.assertTrue(result.info["safeloop"]["recorded_waypoint"])
         self.assertTrue(result.info["safeloop"]["auto_recorded"])
         np.testing.assert_allclose(controller.memory.latest().state, [3.0, 4.0])
+
+    def test_controller_records_known_safe_initial_anchor(self):
+        env = FakeLiberoEnv([3.0, 4.0])
+        predictor = QueuePredictor(
+            [RiskVector(body_probability=0.95, body_tth=0.1, object_probability=0.95, object_tth=0.1)]
+        )
+        controller = SafeLoopController(
+            predictor=predictor,
+            decider=TraceNoopDecider(),
+            record_initial_safe_anchor=True,
+        )
+
+        result = controller.step(env, observation={"joint_pos": [0.1, 0.2]}, proposed_action=[1.0, -1.0])
+
+        self.assertEqual(result.intervention, Intervention.NOOP)
+        self.assertEqual(len(controller.memory), 1)
+        self.assertEqual(controller.last_record_step, 0)
+        self.assertTrue(result.info["safeloop"]["recorded_waypoint"])
+        self.assertTrue(result.info["safeloop"]["initial_safe_anchor_recorded"])
+        self.assertIsNone(controller.memory.latest().risk)
+        self.assertEqual(controller.memory.latest().metadata["source"], "initial_safe_anchor")
+        np.testing.assert_allclose(controller.memory.latest().state, [3.0, 4.0])
+
+    def test_waypoint_memory_can_prefer_recent_safe_anchor(self):
+        memory = WaypointMemory()
+        initial = memory.record(step_index=0, state=[0.0], risk=None)
+        recent = memory.record(
+            step_index=60,
+            state=[1.0],
+            risk=RiskVector(body_probability=0.2, body_tth=1.0, object_probability=0.2, object_tth=1.0),
+        )
+
+        lowest_risk = memory.select_rollback(
+            current_step_index=100,
+            safe_score_threshold=0.7,
+            min_safe_age=30,
+            max_safe_age=200,
+            require_safe=True,
+        )
+        most_recent = memory.select_rollback(
+            current_step_index=100,
+            safe_score_threshold=0.7,
+            min_safe_age=30,
+            max_safe_age=200,
+            require_safe=True,
+            prefer_recent_safe=True,
+        )
+
+        self.assertIs(lowest_risk, initial)
+        self.assertIs(most_recent, recent)
+
+    def test_controller_requires_high_confidence_to_use_initial_anchor(self):
+        env = FakeLiberoEnv([2.0, 2.0])
+        memory = WaypointMemory()
+        memory.record(
+            step_index=0,
+            state=np.asarray([0.0, 0.0], dtype=np.float32),
+            risk=None,
+            metadata={"source": "initial_safe_anchor"},
+        )
+        prediction = SimpleNamespace(
+            risk=RiskVector(0.95, 0.1, 0.95, 0.1),
+            current_body_probability=0.25,
+            current_object_probability=0.95,
+        )
+        controller = SafeLoopController(
+            predictor=QueuePredictor([prediction]),
+            decider=AvailableTargetDecider(),
+            memory=memory,
+            rollback_target_min_age=30,
+            rollback_target_max_age=200,
+            rollback_target_require_safe=True,
+            initial_anchor_rollback_min_current_body_probability=0.30,
+            initial_anchor_rollback_min_current_object_probability=0.98,
+        )
+        controller.step_index = 80
+
+        result = controller.step(env, {"joint_pos": [0.0, 0.0]}, proposed_action=[0.0, 0.0])
+
+        self.assertEqual(result.intervention, Intervention.NOOP)
+        self.assertTrue(result.info["safeloop"]["initial_anchor_rollback_blocked"])
+
+    def test_controller_allows_high_confidence_initial_anchor_rollback(self):
+        env = FakeLiberoEnv([2.0, 2.0])
+        memory = WaypointMemory()
+        memory.record(
+            step_index=0,
+            state=np.asarray([0.0, 0.0], dtype=np.float32),
+            risk=None,
+            metadata={"source": "initial_safe_anchor"},
+        )
+        prediction = SimpleNamespace(
+            risk=RiskVector(0.95, 0.1, 0.95, 0.1),
+            current_body_probability=0.31,
+            current_object_probability=0.50,
+        )
+        controller = SafeLoopController(
+            predictor=QueuePredictor([prediction]),
+            decider=AvailableTargetDecider(),
+            memory=memory,
+            rollback_target_min_age=30,
+            rollback_target_max_age=200,
+            rollback_target_require_safe=True,
+            initial_anchor_rollback_min_current_body_probability=0.30,
+            initial_anchor_rollback_min_current_object_probability=0.98,
+        )
+        controller.step_index = 80
+
+        result = controller.step(env, {"joint_pos": [0.0, 0.0]}, proposed_action=[0.0, 0.0])
+
+        self.assertEqual(result.intervention, Intervention.ROLLBACK)
+        np.testing.assert_allclose(result.observation["state"], [0.0, 0.0])
 
     def test_controller_record_gate_blocks_unsafe_record_waypoint(self):
         env = FakeLiberoEnv([3.0, 4.0])

@@ -9,7 +9,7 @@ import numpy as np
 
 from .decider import Intervention, RuleBasedDecider
 from .libero_motion import LiberoSimState, capture_libero_sim_state, restore_libero_sim_state
-from .memory import Waypoint, WaypointMemory
+from .memory import Waypoint, WaypointMemory, initial_anchor_rollback_allowed
 from .risk import RiskVector
 
 
@@ -104,10 +104,14 @@ class SafeLoopController:
     rollback_target_max_age: int = 120
     rollback_target_min_age: int = 30
     rollback_target_require_safe: bool = False
+    rollback_target_prefer_recent_safe: bool = False
     stuck_rollback_target_max_age: int | None = None
     record_max_risk_score: float | None = None
     record_max_current_body_probability: float | None = None
     record_max_current_object_probability: float | None = None
+    record_initial_safe_anchor: bool = False
+    initial_anchor_rollback_min_current_body_probability: float | None = None
+    initial_anchor_rollback_min_current_object_probability: float | None = None
     auto_record_safe_anchors: bool = False
     auto_record_min_interval: int = 20
     auto_record_max_risk_score: float = 0.4
@@ -158,6 +162,17 @@ class SafeLoopController:
         proposed_action: Any,
         instruction: str | None = None,
     ) -> SafeLoopStepResult:
+        initial_safe_anchor_recorded = False
+        if self.record_initial_safe_anchor and self.step_index == 0 and len(self.memory) == 0:
+            self.memory.record(
+                step_index=0,
+                state=capture_env_state(env),
+                risk=None,
+                metadata={"source": "initial_safe_anchor"},
+            )
+            self.last_record_step = 0
+            initial_safe_anchor_recorded = True
+
         stuck_detected = bool(self.stuck_fallback and self._stuck_monitor.update(observation))
         if self.step_index % int(self.prediction_period) != 0:
             risk = self._risk_history[-1] if self._risk_history else RiskVector(0.0, 1.0, 0.0, 1.0)
@@ -170,6 +185,7 @@ class SafeLoopController:
                 "intervention": Intervention.NOOP.value,
                 "risk": risk_info_dict(risk, current_body_probability, current_object_probability),
                 "recorded_waypoint": False,
+                "initial_safe_anchor_recorded": initial_safe_anchor_recorded,
                 "stuck_fallback": stuck_detected,
                 "decision": {
                     "decider": "periodic",
@@ -201,6 +217,7 @@ class SafeLoopController:
         self._current_hazard_history.append((current_body_probability, current_object_probability))
 
         rollback_waypoint = None
+        initial_anchor_rollback_blocked = False
         rollback_max_age = (
             self.stuck_rollback_target_max_age
             if stuck_detected and self.stuck_rollback_target_max_age is not None
@@ -214,9 +231,20 @@ class SafeLoopController:
                     max_safe_age=rollback_max_age,
                     min_safe_age=self.rollback_target_min_age,
                     require_safe=self.rollback_target_require_safe,
+                    prefer_recent_safe=self.rollback_target_prefer_recent_safe,
                 )
             except IndexError:
                 rollback_waypoint = None
+        if rollback_waypoint is not None and not initial_anchor_rollback_allowed(
+            rollback_waypoint,
+            current_body_probability=current_body_probability,
+            current_object_probability=current_object_probability,
+            stuck_detected=stuck_detected,
+            min_current_body_probability=self.initial_anchor_rollback_min_current_body_probability,
+            min_current_object_probability=self.initial_anchor_rollback_min_current_object_probability,
+        ):
+            rollback_waypoint = None
+            initial_anchor_rollback_blocked = True
 
         intervention = call_decider(
             self.decider,
@@ -255,6 +283,7 @@ class SafeLoopController:
                     "reason": "no_rollback_target",
                     "error_type": type(exc).__name__,
                     "risk": risk_info_dict(risk, current_body_probability, current_object_probability),
+                    "initial_safe_anchor_recorded": initial_safe_anchor_recorded,
                 }
                 if decision_info is not None:
                     safeloop_info["decision"] = decision_info
@@ -289,6 +318,7 @@ class SafeLoopController:
                 "risk": risk_info_dict(risk, current_body_probability, current_object_probability),
                 "stuck_fallback": stuck_detected,
                 "refreshed_rollback_anchor": refreshed_rollback_anchor,
+                "initial_safe_anchor_recorded": initial_safe_anchor_recorded,
             }
             if decision_info is not None:
                 safeloop_info["decision"] = decision_info
@@ -303,16 +333,20 @@ class SafeLoopController:
                 executed_nominal_action=False,
             )
 
-        recorded_waypoint = False
+        recorded_waypoint = initial_safe_anchor_recorded
         auto_recorded = False
         record_blocked = False
-        if intervention == Intervention.RECORD:
+        if intervention == Intervention.RECORD and not initial_safe_anchor_recorded:
             if self._record_allowed(risk, current_body_probability, current_object_probability):
                 self._record_waypoint(env, risk, current_body_probability, current_object_probability)
                 recorded_waypoint = True
             else:
                 record_blocked = True
-        elif self._should_auto_record(risk, current_body_probability, current_object_probability):
+        elif not recorded_waypoint and self._should_auto_record(
+            risk,
+            current_body_probability,
+            current_object_probability,
+        ):
             self._record_waypoint(env, risk, current_body_probability, current_object_probability)
             recorded_waypoint = True
             auto_recorded = True
@@ -323,12 +357,15 @@ class SafeLoopController:
             "intervention": intervention.value,
             "risk": risk_info_dict(risk, current_body_probability, current_object_probability),
             "recorded_waypoint": recorded_waypoint,
+            "initial_safe_anchor_recorded": initial_safe_anchor_recorded,
             "stuck_fallback": stuck_detected,
         }
         if auto_recorded:
             info["safeloop"]["auto_recorded"] = True
         if record_blocked:
             info["safeloop"]["record_blocked"] = True
+        if initial_anchor_rollback_blocked:
+            info["safeloop"]["initial_anchor_rollback_blocked"] = True
         if decision_info is not None:
             info["safeloop"]["decision"] = decision_info
         self.step_index += 1

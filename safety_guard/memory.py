@@ -56,6 +56,7 @@ class WaypointMemory:
         max_safe_age: int = 120,
         min_safe_age: int = 30,
         require_safe: bool = False,
+        prefer_recent_safe: bool = False,
     ) -> Waypoint:
         if not self._items:
             raise IndexError("waypoint memory is empty")
@@ -71,6 +72,8 @@ class WaypointMemory:
                 if risk_score <= float(safe_score_threshold):
                     candidates.append((risk_score, -int(waypoint.step_index), waypoint))
             if candidates:
+                if prefer_recent_safe:
+                    return max((item[2] for item in candidates), key=lambda waypoint: int(waypoint.step_index))
                 return min(candidates, key=lambda item: (item[0], item[1]))[2]
             if age_eligible and not require_safe:
                 return max(age_eligible, key=lambda waypoint: int(waypoint.step_index))
@@ -98,3 +101,22 @@ def _waypoint_risk_score(waypoint: Waypoint) -> float:
     if not scores:
         return 0.0
     return float(max(scores))
+
+
+def initial_anchor_rollback_allowed(
+    waypoint: Waypoint,
+    *,
+    current_body_probability: float,
+    current_object_probability: float,
+    stuck_detected: bool,
+    min_current_body_probability: float | None = None,
+    min_current_object_probability: float | None = None,
+) -> bool:
+    if waypoint.metadata.get("source") != "initial_safe_anchor" or stuck_detected:
+        return True
+    checks = []
+    if min_current_body_probability is not None:
+        checks.append(float(current_body_probability) >= float(min_current_body_probability))
+    if min_current_object_probability is not None:
+        checks.append(float(current_object_probability) >= float(min_current_object_probability))
+    return not checks or any(checks)

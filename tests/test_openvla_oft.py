@@ -7,7 +7,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from safety_guard.openvla_oft import process_libero_action_chunk, resolve_unnorm_key
+from safety_guard.openvla_oft import (
+    perturb_libero_action_chunk,
+    process_libero_action_chunk,
+    resolve_unnorm_key,
+)
 from scripts.libero_policy_utils import policy_observation
 from scripts.serve_openvla_oft import disable_tensorflow_gpu
 
@@ -28,6 +32,40 @@ def test_process_libero_action_chunk_matches_official_gripper_conversion() -> No
     actions[:, -1] = [0.0, 0.5, 1.0]
     processed = process_libero_action_chunk(actions)
     np.testing.assert_array_equal(processed[:, -1], [1.0, 0.0, -1.0])
+
+
+def test_post_rollback_perturbation_is_reproducible_decaying_and_preserves_gripper() -> None:
+    actions = np.zeros((4, 7), dtype=np.float32)
+    actions[:, -1] = [1.0, -1.0, 1.0, -1.0]
+    first, first_noise = perturb_libero_action_chunk(
+        actions,
+        rng=np.random.default_rng(17),
+        std=0.02,
+        final_scale=0.25,
+    )
+    second, second_noise = perturb_libero_action_chunk(
+        actions,
+        rng=np.random.default_rng(17),
+        std=0.02,
+        final_scale=0.25,
+    )
+
+    np.testing.assert_array_equal(first, second)
+    np.testing.assert_array_equal(first_noise, second_noise)
+    np.testing.assert_allclose(first[0, :6], first_noise)
+    np.testing.assert_allclose(first[-1, :6], first_noise * 0.25)
+    np.testing.assert_array_equal(first[:, -1], actions[:, -1])
+
+
+def test_zero_post_rollback_perturbation_is_an_exact_noop() -> None:
+    actions = np.linspace(-1.0, 1.0, num=21, dtype=np.float32).reshape(3, 7)
+    perturbed, noise = perturb_libero_action_chunk(
+        actions,
+        rng=np.random.default_rng(1),
+        std=0.0,
+    )
+    np.testing.assert_array_equal(perturbed, actions)
+    np.testing.assert_array_equal(noise, np.zeros(6, dtype=np.float32))
 
 
 def test_openvla_observation_keeps_raw_images_and_adds_suite_metadata() -> None:

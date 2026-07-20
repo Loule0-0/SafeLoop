@@ -42,9 +42,9 @@ CUDA_VISIBLE_DEVICES=1 python scripts/run_release_decider_training.py \
   --policy-port 8001
 ```
 
-The recipe reuses `v23_success_balanced_step1000_multitask_head.pt` as the predictor, initializes from the released generic SafeLoop decider, and adapts only the 49D actor/56D asymmetric critic on LIBERO-10. It preserves the official eight-step OpenVLA-OFT action horizon and trains with the full 520-step LIBERO-10 episode limit, so PPO receives both completion rewards and failed-episode penalties instead of learning from short, success-free truncations.
+The recipe reuses `v23_success_balanced_step1000_multitask_head.pt` as the predictor, initializes from the released generic SafeLoop decider, and adapts only the 49D actor/56D asymmetric critic on the seven paper LIBERO-90 tasks. It preserves the official eight-step OpenVLA-OFT action horizon and uses the suite's full 400-step episode limit, so PPO receives both completion rewards and failed-episode penalties instead of learning from short, success-free truncations.
 
-For unattended runs, `scripts/launch_openvla_oft_decider_training.sh` records a status file and log under the selected output root. The release recipe uses a moderate object-hazard penalty, explicit record exploration, a two-rollback budget, and matching train/evaluation gates. Object rollback is allowed only from a high-confidence early prediction while current object contact is low. Rollback targets must be low-risk and 45-160 control steps old; an expired waypoint is never used as a fallback.
+For unattended runs, `scripts/launch_openvla_oft_decider_training.sh` records a status file and log under the selected output root. The selected two-update recipe uses class-balanced behavior cloning, asymmetric PPO, high rollback exploration, no forced record exploration, and a two-rollback budget. Training uses permissive gates to expose the actor to rollback outcomes. Deployment then applies the separately validated high-confidence gates from `configs/release/openvla_oft_24task_eval.json`. This distinction is intentional: PPO learns action preferences from broad intervention opportunities, while the deployed controller filters those preferences using calibrated predictor confidence and safe-memory constraints.
 
 The OpenVLA-OFT recipe also enables a proprioceptive stuck fallback. It observes end-effector displacement over a 70-step window and promotes sustained low motion to the predictor's body-risk channel. This only opens the learned decider's rollback option and supplies an observable risk feature; it does not use simulator contacts or privileged hazard labels. The current-object veto is bypassed only after sustained stuck detection when the learned decider assigns rollback at least 0.95 probability, a safe waypoint exists, and the rollback budget permits it. Regular predictive rollback keeps the 160-step waypoint age cap; the sustained-stuck path may use a verified safe waypoint up to 320 steps old. A successful rollback refreshes the reached safe pose as a current anchor, so a later recovery returns to a recently verified state instead of an increasingly old trajectory point.
 
@@ -67,13 +67,15 @@ CUDA_VISIBLE_DEVICES=1 \
 LIBERO_ROOT=/path/to/LIBERO \
 QWEN_MODEL=/path/to/Qwen2.5-VL-3B-Instruct \
 PREDICTOR_CHECKPOINT=/path/to/v23_success_balanced_step1000_multitask_head.pt \
-DECISION_CHECKPOINT=/path/to/online_decider_update004.pt \
-POLICY_PORT=8001 TASK_IDS=8 MODE=rl \
+DECISION_CHECKPOINT=/path/to/online_decider_update001.pt \
+POLICY_PORT=8001 TASK_IDS=30 MAX_ROLLOUT_STEPS=400 MODE=rl \
 bash scripts/launch_openvla_oft_eval.sh
 ```
 
-The launcher defaults to the suite's full 520-step limit, stores the summary, trace, and video in one run directory, and never treats automatic simulator proxies as paper hazard annotations.
+The release recipe uses each suite's full control horizon, stores the summary, trace, and video in one run directory, and never treats automatic simulator proxies as paper hazard annotations.
 
-The release deployment selects update 4 from the staged actor checkpoints. Its regular future-body gate is intentionally conservative (`probability >= 0.72` and `TTH <= 0.50`) to avoid interrupting normal low-speed manipulation. Proprioceptive stuck recovery remains independent: sustained low motion promotes the current body signal to an immediate hazard, so tightening the predictive gate does not disable stuck rollback.
+The release deployment selects `online_decider_update001.pt`. Normal contact is filtered with `current_body >= 0.55`, while future body rollback requires `probability >= 0.50`; object rollback requires `current_object >= 0.99` or `future_object >= 0.98`. Safe anchors are recorded every 40 control steps only below the configured risk limits. Rollback prefers the most recent verified anchor that is 30-200 control steps old and has safe score at least 0.90. Proprioceptive stuck recovery remains independent: sustained low motion promotes the current body signal to an immediate hazard, so conservative predictive gates do not disable stuck rollback.
 
-For the full paper task matrix, use `scripts/run_release_24task_eval.py` with `configs/release/openvla_oft_24task_eval.json`. The default profile runs all 24 tasks and 16 paired seed/initial-state indices; `--seeds 0` runs a 24-task integration smoke test, and `--decision-checkpoint` selects an arbitrary candidate actor.
+After a rollback, the next OpenVLA-OFT action chunk receives one seed-reproducible perturbation on the six arm dimensions. Its standard deviation is `0.04` at the first action and decays linearly to `0.25` of that magnitude at the end of the chunk; the gripper command is unchanged. This implements SafeLoop's stochastic replanning step while keeping paired-seed evaluations reproducible. Setting `POST_ROLLBACK_ACTION_NOISE_STD=0` restores deterministic OpenVLA-OFT execution.
+
+For the full paper task matrix, use `scripts/run_release_24task_eval.py` with `configs/release/openvla_oft_24task_eval.json`. The default profile runs all 24 tasks and 16 paired seed/initial-state indices, enables SafeLoop for every entry, and automatically caps each rollout at the official suite horizon. `--seeds 0` runs a 24-task integration smoke test, and `--decision-checkpoint` selects an arbitrary candidate actor.

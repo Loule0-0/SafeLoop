@@ -199,6 +199,66 @@ class OnlineRLTests(unittest.TestCase):
         self.assertLess(stuck_reward, object_reward)
         self.assertEqual(online_hazard_score(OnlineStepSignals(stuck_hazard=True), config), 1.5)
 
+    def test_online_reward_penalizes_hazard_onset_separately(self):
+        from safety_guard.decider import Intervention
+        from safety_guard.online_rl import OnlineRewardConfig, OnlineStepSignals, online_safeloop_reward
+
+        config = OnlineRewardConfig(hazard_penalty=0.0, hazard_onset_penalty=-2.0)
+        onset = online_safeloop_reward(
+            OnlineStepSignals(stuck_hazard=True, hazard_event=True),
+            Intervention.NOOP,
+            config=config,
+        )
+        persistent = online_safeloop_reward(
+            OnlineStepSignals(stuck_hazard=True, hazard_event=False),
+            Intervention.NOOP,
+            config=config,
+        )
+
+        self.assertAlmostEqual(onset - persistent, -2.0)
+
+    def test_monitor_stuck_is_used_by_training_reward_and_onset_label(self):
+        from safety_guard.online_rl import OnlineStepSignals
+        from scripts.train_online_safeguard_decider import augment_training_signals
+
+        onset = augment_training_signals(
+            OnlineStepSignals(),
+            monitor_stuck=True,
+            previous_any_hazard=False,
+        )
+        persistent = augment_training_signals(
+            OnlineStepSignals(),
+            monitor_stuck=True,
+            previous_any_hazard=True,
+        )
+
+        self.assertTrue(onset.stuck_hazard)
+        self.assertTrue(onset.hazard_event)
+        self.assertFalse(persistent.hazard_event)
+
+    def test_initial_actor_logit_scaling_preserves_argmax_and_reduces_margin(self):
+        from safety_guard.online_rl import AsymmetricActorCriticPolicy
+        from scripts.train_online_safeguard_decider import scale_actor_logits
+
+        policy = AsymmetricActorCriticPolicy(actor_dim=4, critic_dim=6, hidden_dim=8)
+        features = torch.ones(1, 4)
+        with torch.no_grad():
+            before = policy.forward_actor(features).clone()
+        scale_actor_logits(policy, 0.25)
+        with torch.no_grad():
+            after = policy.forward_actor(features)
+
+        self.assertEqual(int(torch.argmax(before)), int(torch.argmax(after)))
+        self.assertTrue(torch.allclose(after, before * 0.25, atol=1e-6))
+
+    def test_predictor_proxy_hazard_uses_realized_channels_and_stuck(self):
+        from scripts.train_online_safeguard_decider import predictor_proxy_hazard
+
+        self.assertFalse(predictor_proxy_hazard(0.98, 0.98, False))
+        self.assertTrue(predictor_proxy_hazard(0.99, 0.10, False))
+        self.assertTrue(predictor_proxy_hazard(0.10, 0.99, False))
+        self.assertTrue(predictor_proxy_hazard(0.10, 0.10, True))
+
     def test_privileged_features_include_stuck_hazard(self):
         from safety_guard.online_rl import OnlineStepSignals, privileged_feature_dim
 
@@ -300,6 +360,21 @@ class OnlineRLTests(unittest.TestCase):
         self.assertAlmostEqual(improved, 0.9)
         self.assertEqual(unchanged_safe, 0.0)
 
+    def test_rollback_outcome_credit_rewards_safe_preemptive_rollback(self):
+        from safety_guard.online_rl import OnlineRewardConfig, rollback_outcome_credit
+
+        config = OnlineRewardConfig(rollback_preemptive_bonus=3.5)
+        credit = rollback_outcome_credit(
+            post_rollback_hazard_steps=0,
+            observed_steps=20,
+            pre_rollback_hazard_steps=0,
+            pre_observed_steps=20,
+            preemptive_warning=True,
+            config=config,
+        )
+
+        self.assertEqual(credit, 3.5)
+
     def test_rollback_terminal_credit_distributes_episode_success_or_failure(self):
         from safety_guard.online_rl import OnlineRewardConfig, rollback_terminal_credit
 
@@ -311,6 +386,15 @@ class OnlineRLTests(unittest.TestCase):
         self.assertEqual(rollback_terminal_credit(True, rollback_count=2, config=config), 1.0)
         self.assertEqual(rollback_terminal_credit(False, rollback_count=2, config=config), -0.5)
         self.assertEqual(rollback_terminal_credit(True, rollback_count=0, config=config), 0.0)
+
+    def test_noop_outcome_credit_separates_safe_and_hazardous_continuation(self):
+        from safety_guard.online_rl import OnlineRewardConfig, noop_outcome_credit
+
+        config = OnlineRewardConfig(noop_safe_bonus=1.5, noop_hazard_penalty=-2.0)
+
+        self.assertEqual(noop_outcome_credit(0.0, observed_steps=20, config=config), 1.5)
+        self.assertEqual(noop_outcome_credit(1.0, observed_steps=5, config=config), -2.0)
+        self.assertEqual(noop_outcome_credit(0.0, observed_steps=0, config=config), 0.0)
 
     def test_rollback_exploration_forces_allowed_rollback_and_keeps_logprob(self):
         from safety_guard.online_rl import AsymmetricActorCriticPolicy, sample_action_with_rollback_exploration
@@ -331,6 +415,28 @@ class OnlineRLTests(unittest.TestCase):
 
         self.assertEqual(action, ThreeAction.ROLLBACK)
         self.assertTrue(explored)
+        self.assertTrue(torch.isfinite(logprob))
+
+    def test_noop_exploration_forces_counterfactual_continuation(self):
+        from safety_guard.online_rl import AsymmetricActorCriticPolicy
+        from safety_guard.online_rl import sample_action_with_intervention_exploration
+        from safety_guard.rl_decider import ThreeAction
+
+        policy = AsymmetricActorCriticPolicy(actor_dim=4, critic_dim=10, hidden_dim=8)
+        with torch.no_grad():
+            for parameter in policy.parameters():
+                parameter.zero_()
+            policy.actor.bias[:] = torch.tensor([-8.0, 0.0, 8.0])
+
+        action, logprob, exploration = sample_action_with_intervention_exploration(
+            policy,
+            actor_features=[0.0, 0.0, 0.0, 0.0],
+            action_mask=[True, True, True],
+            noop_exploration_probability=1.0,
+        )
+
+        self.assertEqual(action, ThreeAction.NOOP)
+        self.assertEqual(exploration, "noop")
         self.assertTrue(torch.isfinite(logprob))
 
     def test_asymmetric_ppo_skips_masked_teacher_actions_for_bc(self):
@@ -359,6 +465,7 @@ class OnlineRLTests(unittest.TestCase):
                 dtype=torch.bool,
             ),
             teacher_actions=torch.tensor([2, 1, 1], dtype=torch.long),
+            policy_weights=torch.tensor([1.0, 0.0, 1.0]),
         )
 
         history = trainer.update(batch, epochs=1, bc_coef=1.0)
@@ -367,6 +474,54 @@ class OnlineRLTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(torch.tensor(history[-1]["bc_loss"])))
         self.assertEqual(history[-1]["bc_valid_count"], 1.0)
         self.assertEqual(history[-1]["bc_ignored_count"], 2.0)
+        self.assertEqual(history[-1]["bc_record_count"], 1.0)
+        self.assertEqual(history[-1]["ppo_valid_count"], 2.0)
+        self.assertEqual(history[-1]["ppo_ignored_count"], 1.0)
+        self.assertIn("actor_grad_norm", history[-1])
+        self.assertIn("critic_grad_norm", history[-1])
+
+    def test_asymmetric_ppo_uses_independent_actor_and_critic_learning_rates(self):
+        from safety_guard.online_rl import (
+            AsymmetricActorCriticPolicy,
+            AsymmetricPPOConfig,
+            AsymmetricPPOTrainer,
+            OnlineRolloutBatch,
+        )
+
+        policy = AsymmetricActorCriticPolicy(actor_dim=4, critic_dim=6, hidden_dim=8)
+        actor_before = [parameter.detach().clone() for parameter in policy.actor_encoder.parameters()]
+        critic_before = [parameter.detach().clone() for parameter in policy.critic_encoder.parameters()]
+        trainer = AsymmetricPPOTrainer(
+            policy,
+            AsymmetricPPOConfig(actor_learning_rate=0.0, critic_learning_rate=1e-2),
+        )
+        batch = OnlineRolloutBatch(
+            actor_observations=torch.randn(4, 4),
+            critic_observations=torch.randn(4, 6),
+            actions=torch.tensor([0, 1, 0, 1], dtype=torch.long),
+            old_logprobs=torch.zeros(4),
+            rewards=torch.tensor([0.0, 1.0, -1.0, 2.0]),
+            dones=torch.tensor([False, True, False, True]),
+            action_masks=torch.tensor([[True, True, False]] * 4, dtype=torch.bool),
+        )
+
+        trainer.update(batch, epochs=1)
+
+        self.assertTrue(
+            all(torch.equal(before, after) for before, after in zip(actor_before, policy.actor_encoder.parameters()))
+        )
+        self.assertTrue(
+            any(not torch.equal(before, after) for before, after in zip(critic_before, policy.critic_encoder.parameters()))
+        )
+
+    def test_mark_online_episode_terminal_closes_truncated_episode(self):
+        from safety_guard.online_rl import mark_online_episode_terminal
+
+        records = [{"done": False}, {"done": False}]
+        mark_online_episode_terminal(records)
+
+        self.assertFalse(records[0]["done"])
+        self.assertTrue(records[-1]["done"])
 
     def test_min_step_and_max_count_do_not_enable_risk_gate_by_themselves(self):
         from scripts.train_online_safeguard_decider import rollback_gate_enabled
