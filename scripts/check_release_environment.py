@@ -8,7 +8,7 @@ import importlib.metadata
 import importlib.util
 import json
 import os
-import socket
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -23,27 +23,38 @@ PINNED_SUBMODULES = {
 }
 PINNED_DISTRIBUTIONS = {
     "accelerate": "1.8.1",
+    "future": "1.0.0",
     "huggingface-hub": "0.33.4",
     "imageio": "2.37.0",
     "imageio-ffmpeg": "0.6.0",
+    "matplotlib": "3.10.3",
     "numpy": "1.26.4",
     "peft": "0.15.2",
     "pillow": "11.2.1",
     "qwen-vl-utils": "0.0.14",
+    "termcolor": "3.1.0",
     "torch": "2.7.1",
+    "torchvision": "0.22.1",
     "transformers": "4.53.2",
+    "uv": "0.12.0",
+    "websockets": "15.0.1",
 }
 REQUIRED_MODULES = {
     "accelerate": "accelerate",
+    "future": "future",
     "huggingface-hub": "huggingface_hub",
     "imageio": "imageio",
+    "matplotlib": "matplotlib",
     "numpy": "numpy",
     "peft": "peft",
     "pillow": "PIL",
     "qwen-vl-utils": "qwen_vl_utils",
+    "termcolor": "termcolor",
     "torch": "torch",
+    "torchvision": "torchvision",
     "transformers": "transformers",
-    "libero": "libero",
+    "websockets": "websockets",
+    "libero": "libero.libero",
     "openpi-client": "openpi_client",
     "robosuite": "robosuite",
 }
@@ -73,6 +84,10 @@ def _check_install() -> tuple[list[str], list[str], dict[str, str]]:
     if sys.version_info[:2] != EXPECTED_PYTHON:
         errors.append(f"Python 3.10 is required; found {sys.version.split()[0]}")
 
+    libero_source = PROJECT_ROOT / "third_party" / "LIBERO"
+    if libero_source.is_dir() and str(libero_source) not in sys.path:
+        sys.path.insert(0, str(libero_source))
+
     for distribution, module in REQUIRED_MODULES.items():
         if importlib.util.find_spec(module) is None:
             errors.append(f"missing Python module: {module}")
@@ -88,6 +103,19 @@ def _check_install() -> tuple[list[str], list[str], dict[str, str]]:
                 f"package version mismatch for {distribution}: "
                 f"expected {expected_version}, found {versions[distribution]}"
             )
+
+    try:
+        versions["uv"] = importlib.metadata.version("uv")
+    except importlib.metadata.PackageNotFoundError:
+        errors.append("missing Python distribution: uv")
+    else:
+        if versions["uv"].split("+", 1)[0] != PINNED_DISTRIBUTIONS["uv"]:
+            errors.append(
+                "package version mismatch for uv: "
+                f"expected {PINNED_DISTRIBUTIONS['uv']}, found {versions['uv']}"
+            )
+    if shutil.which("uv") is None:
+        errors.append("missing executable: uv")
 
     for relative_path, expected_head in PINNED_SUBMODULES.items():
         path = PROJECT_ROOT / relative_path
@@ -149,11 +177,21 @@ def _check_eval_assets() -> list[str]:
 
 
 def _check_policy_server(host: str, port: int, backend: str) -> str | None:
+    from websockets.exceptions import WebSocketException
+    from websockets.sync.client import connect
+
     try:
-        with socket.create_connection((host, port), timeout=2.0):
-            return None
-    except OSError as exc:
+        with connect(
+            f"ws://{host}:{port}",
+            compression=None,
+            max_size=None,
+            open_timeout=2.0,
+            close_timeout=1.0,
+        ) as connection:
+            connection.recv(timeout=2.0)
+    except (OSError, TimeoutError, WebSocketException) as exc:
         return f"cannot connect to {backend} policy server at {host}:{port}: {exc}"
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:

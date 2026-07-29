@@ -3,7 +3,9 @@
 bddl==1.0.1
 cloudpickle==2.2.1
 easydict==1.13
+future==1.0.0
 gym==0.25.2
+matplotlib==3.10.3
 mujoco==3.2.3
 numba==0.61.2
 opencv-python==4.10.0.84

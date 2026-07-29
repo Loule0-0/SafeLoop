@@ -34,6 +34,7 @@ safety_guard/
 
 scripts/
   quickstart_pi0_safeloop.sh             one-task Pi0 + SafeLoop rollout
+  serve_pi0_policy.py                    inference-only OpenPI server bootstrap
   download_release_weights.py            pinned weight download and SHA256 check
   check_release_environment.py           dependency, submodule, and asset checks
   evaluate_pi0_safeguard_closed_loop.py  rollout and data collection
@@ -83,9 +84,17 @@ Download the Pi0 LIBERO checkpoint through the pinned OpenPI code:
 
 ```bash
 export OPENPI_ROOT="$PWD/third_party/openpi"
+(
+  cd "$OPENPI_ROOT"
+  env -u VIRTUAL_ENV uv sync --frozen \
+    --no-install-package lerobot \
+    --no-install-package rerun-sdk \
+    --no-install-package evdev \
+    --no-install-package av
+)
 export PI0_CHECKPOINT_DIR="$(
   cd "$OPENPI_ROOT"
-  uv run python -c \
+  env -u VIRTUAL_ENV uv run --no-sync python -c \
     'from openpi.shared import download; print(download.maybe_download("gs://openpi-assets/checkpoints/pi0_libero"))'
 )"
 ```
@@ -101,7 +110,7 @@ python scripts/download_release_weights.py --output-dir "$SAFELOOP_WEIGHTS" --ch
 
 ## Quickstart
 
-Run the Pi0 + SafeLoop example for LIBERO-10 task 9, seed 214:
+Run the Pi0 + SafeLoop example for LIBERO-10 task 6, seed 389:
 
 ```bash
 export QWEN_MODEL="$PWD/.artifacts/Qwen2.5-VL-3B-Instruct"
@@ -116,20 +125,27 @@ rollout summary and video under `outputs/quickstart/`.
 Useful overrides:
 
 ```bash
-SAFELOOP_TASK=libero_10:6 SAFELOOP_SEED=389 \
+SAFELOOP_TASK=libero_10:9 SAFELOOP_SEED=214 \
 POLICY_CUDA_VISIBLE_DEVICES=0 SAFELOOP_CUDA_VISIBLE_DEVICES=0 \
 bash scripts/quickstart_pi0_safeloop.sh
 ```
 
 Set `SAFELOOP_START_POLICY_SERVER=0` to use an existing policy server at
-`POLICY_HOST:POLICY_PORT`.
+`POLICY_HOST:POLICY_PORT`. Set `SAFELOOP_SYNC_OPENPI=0` when the pinned OpenPI
+environment is already installed.
 
 ## Start the Pi0 Server Manually
 
 ```bash
+export SAFELOOP_ROOT="$PWD"
 cd "$OPENPI_ROOT"
-uv sync --frozen
-CUDA_VISIBLE_DEVICES=0 uv run scripts/serve_policy.py policy:checkpoint \
+env -u VIRTUAL_ENV uv sync --frozen \
+  --no-install-package lerobot \
+  --no-install-package rerun-sdk \
+  --no-install-package evdev \
+  --no-install-package av
+env -u VIRTUAL_ENV CUDA_VISIBLE_DEVICES=0 \
+uv run --no-sync python "$SAFELOOP_ROOT/scripts/serve_pi0_policy.py" policy:checkpoint \
   --policy.config=pi0_libero \
   --policy.dir="$PI0_CHECKPOINT_DIR"
 ```

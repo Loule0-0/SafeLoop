@@ -6,11 +6,13 @@ LIBERO_ROOT="${LIBERO_ROOT:-${ROOT}/third_party/LIBERO}"
 OPENPI_ROOT="${OPENPI_ROOT:-${ROOT}/third_party/openpi}"
 SAFELOOP_WEIGHTS="${SAFELOOP_WEIGHTS:-${ROOT}/.artifacts/safeloop_weights}"
 SAFELOOP_OUTPUT="${SAFELOOP_OUTPUT:-${ROOT}/outputs/quickstart}"
-SAFELOOP_TASK="${SAFELOOP_TASK:-libero_10:9}"
-SAFELOOP_SEED="${SAFELOOP_SEED:-214}"
+SAFELOOP_TASK="${SAFELOOP_TASK:-libero_10:6}"
+SAFELOOP_SEED="${SAFELOOP_SEED:-389}"
 POLICY_HOST="${POLICY_HOST:-127.0.0.1}"
 POLICY_PORT="${POLICY_PORT:-8000}"
+POLICY_STARTUP_TIMEOUT="${POLICY_STARTUP_TIMEOUT:-600}"
 SAFELOOP_START_POLICY_SERVER="${SAFELOOP_START_POLICY_SERVER:-1}"
+SAFELOOP_SYNC_OPENPI="${SAFELOOP_SYNC_OPENPI:-1}"
 POLICY_CUDA_VISIBLE_DEVICES="${POLICY_CUDA_VISIBLE_DEVICES:-0}"
 SAFELOOP_CUDA_VISIBLE_DEVICES="${SAFELOOP_CUDA_VISIBLE_DEVICES:-0}"
 POLICY_LOG="${SAFELOOP_OUTPUT}/pi0_policy_server.log"
@@ -27,32 +29,51 @@ python "${ROOT}/scripts/download_release_weights.py" \
 policy_pid=""
 cleanup() {
   if [[ -n "${policy_pid}" ]]; then
-    kill "${policy_pid}" 2>/dev/null || true
+    kill -TERM -- "-${policy_pid}" 2>/dev/null || true
     wait "${policy_pid}" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
 
 if [[ "${SAFELOOP_START_POLICY_SERVER}" == "1" ]]; then
+  if [[ "${SAFELOOP_SYNC_OPENPI}" == "1" ]]; then
+    (
+      cd "${OPENPI_ROOT}"
+      env -u VIRTUAL_ENV uv sync --frozen \
+        --no-install-package lerobot \
+        --no-install-package rerun-sdk \
+        --no-install-package evdev \
+        --no-install-package av
+    )
+  fi
   (
     cd "${OPENPI_ROOT}"
-    CUDA_VISIBLE_DEVICES="${POLICY_CUDA_VISIBLE_DEVICES}" \
-      uv run scripts/serve_policy.py policy:checkpoint \
+    exec setsid env -u VIRTUAL_ENV CUDA_VISIBLE_DEVICES="${POLICY_CUDA_VISIBLE_DEVICES}" \
+      uv run --no-sync python "${ROOT}/scripts/serve_pi0_policy.py" \
+        --port="${POLICY_PORT}" policy:checkpoint \
         --policy.config=pi0_libero \
         --policy.dir="${PI0_CHECKPOINT_DIR}"
   ) >"${POLICY_LOG}" 2>&1 &
   policy_pid="$!"
 fi
 
-for _ in $(seq 1 180); do
+for _ in $(seq 1 "${POLICY_STARTUP_TIMEOUT}"); do
   if python - "${POLICY_HOST}" "${POLICY_PORT}" <<'PY'
-import socket
 import sys
 
+from websockets.exceptions import WebSocketException
+from websockets.sync.client import connect
+
 try:
-    with socket.create_connection((sys.argv[1], int(sys.argv[2])), timeout=0.5):
-        pass
-except OSError:
+    with connect(
+        f"ws://{sys.argv[1]}:{int(sys.argv[2])}",
+        compression=None,
+        max_size=None,
+        open_timeout=0.5,
+        close_timeout=0.5,
+    ) as connection:
+        connection.recv(timeout=0.5)
+except (OSError, TimeoutError, WebSocketException):
     raise SystemExit(1)
 PY
   then
