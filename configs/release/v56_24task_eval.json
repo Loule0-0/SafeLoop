@@ -1,9 +1,9 @@
 {
-  "release": "v56_24task_release",
-  "paper": "SafeLoop: Risk-Aware Rollback for Vision-Language-Action Manipulation",
+  "release": "pi0-v1",
   "seed_selects_init_state": true,
   "huggingface": {
     "weights_repo": "Jaqen0-0/SafeLoop",
+    "weights_revision": "pi0-v1",
     "dataset_repo": "Jaqen0-0/SafeLoop-Training-Data"
   },
   "task_suite": {
@@ -86,6 +86,23 @@
     "save-video-episodes": 1,
     "manual-hazard-labels": true
   },
+  "suite_args": {
+    "libero_spatial": {
+      "max-rollout-steps": 220
+    },
+    "libero_object": {
+      "max-rollout-steps": 280
+    },
+    "libero_goal": {
+      "max-rollout-steps": 300
+    },
+    "libero_10": {
+      "max-rollout-steps": 520
+    },
+    "libero_90": {
+      "max-rollout-steps": 400
+    }
+  },
   "gates": {
     "standard": {},
     "libero90_safeanchor": {
@@ -105,7 +122,7 @@
   },
   "profiles": {
     "safeloop_all": {
-      "summary": "Default paper evaluation: SafeLoop on all 24 tasks with 16 seeds per task (384 rollouts).",
+      "summary": "SafeLoop on all 24 configured tasks with 16 seeds per task.",
       "seeds": [
         0,
         1,
@@ -191,8 +208,8 @@
         }
       ]
     },
-    "paper_24task_release": {
-      "summary": "Alias for the paper SafeLoop evaluation: all 24 tasks with 16 seeds per task (384 rollouts).",
+    "full_24task_release": {
+      "summary": "Alias for the full SafeLoop evaluation: all 24 tasks with 16 seeds per task.",
       "seeds": [
         0,
         1,

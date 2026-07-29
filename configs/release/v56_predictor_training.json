@@ -1,8 +1,8 @@
 {
-  "release": "v56_24task_release",
-  "paper": "SafeLoop: Risk-Aware Rollback for Vision-Language-Action Manipulation",
+  "release": "pi0-v1",
   "huggingface": {
     "weights_repo": "Jaqen0-0/SafeLoop",
+    "weights_revision": "pi0-v1",
     "dataset_repo": "Jaqen0-0/SafeLoop-Training-Data"
   },
   "heads": {

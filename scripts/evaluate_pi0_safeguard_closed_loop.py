@@ -20,7 +20,6 @@ from safety_guard.decider import Intervention
 from safety_guard.libero_motion import MotionPlanningRollbackExecutor
 from safety_guard.libero_oracle import LiberoHazardOracle
 from safety_guard.online_rl import OnlineStepSignals
-from safety_guard.openvla_oft import perturb_libero_action_chunk
 from safety_guard.predictors import ActionNormRiskPredictor, ConstantRiskPredictor
 from safety_guard.qwen_multitask import (
     QWEN_IMAGE_TOKEN,
@@ -85,7 +84,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--libero-root", type=Path, default=env_path("LIBERO_ROOT"))
     parser.add_argument("--checkpoint-dir", type=Path, default=env_path("PI0_CHECKPOINT_DIR"))
     parser.add_argument("--config-name", default="pi0_libero")
-    parser.add_argument("--policy-backend", choices=["pi0", "openvla-oft"], default="pi0")
+    parser.add_argument("--policy-backend", choices=["pi0"], default="pi0")
     parser.add_argument("--policy-mode", choices=["inprocess", "websocket"], default="inprocess")
     parser.add_argument("--policy-host", default="127.0.0.1")
     parser.add_argument("--policy-port", type=int, default=8000)
@@ -106,15 +105,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--max-rollout-steps", "--max-steps", dest="max_rollout_steps", type=int, default=120)
     parser.add_argument("--allow-extended-rollout", action="store_true")
     parser.add_argument("--replan-steps", type=int, default=5)
-    parser.add_argument("--post-rollback-action-noise-std", type=float, default=0.0)
-    parser.add_argument("--post-rollback-action-noise-final-scale", type=float, default=0.25)
-    parser.add_argument("--post-rollback-action-noise-replans", type=int, default=1)
     parser.add_argument("--mode", choices=["baseline", "teacher", "rl"], default="baseline")
     parser.add_argument("--disable-safeloop", action="store_true")
     parser.add_argument(
         "--manual-hazard-labels",
         action="store_true",
-        help="Skip automatic hazard counting in evaluation summaries; paper safety metrics should be filled by manual review.",
+        help="Disable automatic hazard counting in evaluation summaries.",
     )
     parser.add_argument("--predictor", choices=["constant", "action-norm", "qwen-multitask"], default="action-norm")
     parser.add_argument("--constant-risk", nargs=4, type=float, default=[0.0, 1.0, 0.0, 1.0])
@@ -189,12 +185,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.disable_safeloop:
         args.mode = "baseline"
-    if args.post_rollback_action_noise_std < 0.0:
-        parser.error("--post-rollback-action-noise-std must be non-negative")
-    if not 0.0 <= args.post_rollback_action_noise_final_scale <= 1.0:
-        parser.error("--post-rollback-action-noise-final-scale must be in [0, 1]")
-    if args.post_rollback_action_noise_replans < 0:
-        parser.error("--post-rollback-action-noise-replans must be non-negative")
     args.task_ids = _parse_task_ids(args.task_ids) if args.task_ids else [int(args.task_id)]
     if args.out is None:
         if args.output_dir is None:
@@ -328,19 +318,6 @@ def run_episode(
     use_hazard_oracle = (not args.manual_hazard_labels) or args.qwen_rollout_jsonl_out is not None
     oracle = LiberoHazardOracle(env.sim) if use_hazard_oracle else None
     action_plan: collections.deque[np.ndarray] = collections.deque()
-    action_perturbation_plan: collections.deque[list[float] | None] = collections.deque()
-    perturbation_rng = np.random.default_rng(
-        np.random.SeedSequence(
-            [
-                int(args.seed),
-                int(args.task_id),
-                int(init_index),
-                int(episode_index) if args.fixed_init_state_index is not None else 0,
-                0x5AFE,
-            ]
-        )
-    )
-    post_rollback_noise_replans_remaining = 0
     frames: list[np.ndarray] = []
     interventions = {"noop": 0, "record": 0, "rollback": 0}
     rollback_planned = 0
@@ -424,31 +401,12 @@ def run_episode(
                 policy_backend=args.policy_backend,
                 benchmark=args.benchmark,
             )
-            if args.policy_backend == "openvla-oft":
-                policy_input["policy/episode_seed"] = int(args.seed + episode_index)
-                policy_input["policy/reset"] = total_steps == 0
             action_chunk = np.asarray(policy.infer(policy_input)["actions"])
             if len(action_chunk) < args.replan_steps:
                 raise RuntimeError(f"policy returned {len(action_chunk)} actions, need {args.replan_steps}")
             action_chunk = action_chunk[: args.replan_steps]
-            perturbation = None
-            if (
-                args.policy_backend == "openvla-oft"
-                and args.post_rollback_action_noise_std > 0.0
-                and post_rollback_noise_replans_remaining > 0
-            ):
-                action_chunk, perturbation_vector = perturb_libero_action_chunk(
-                    action_chunk,
-                    rng=perturbation_rng,
-                    std=args.post_rollback_action_noise_std,
-                    final_scale=args.post_rollback_action_noise_final_scale,
-                )
-                perturbation = perturbation_vector.tolist()
-                post_rollback_noise_replans_remaining -= 1
             action_plan.extend(action_chunk)
-            action_perturbation_plan.extend([perturbation] * len(action_chunk))
         action = action_plan.popleft()
-        action_perturbation = action_perturbation_plan.popleft()
         pre_action_signals = (
             oracle.read(success=False, task_reward=0.0)
             if oracle is not None
@@ -498,10 +456,6 @@ def run_episode(
             safeloop_info = dict((info or {}).get("safeloop") or {})
             if intervention == Intervention.ROLLBACK:
                 action_plan.clear()
-                action_perturbation_plan.clear()
-                post_rollback_noise_replans_remaining = int(
-                    args.post_rollback_action_noise_replans
-                )
                 saw_rollback = True
                 if safeloop_info.get("planned"):
                     rollback_planned += 1
@@ -556,8 +510,6 @@ def run_episode(
                     "rollback_failed_total": int(rollback_failed),
                     "rollback_rendered_frames_total": int(rollback_rendered_frames),
                     "nominal_after_rollback_total": int(nominal_after_rollback),
-                    "post_rollback_action_perturbed": action_perturbation is not None,
-                    "post_rollback_action_perturbation": action_perturbation,
                     "safeloop": safeloop_info,
                 }
             )
@@ -815,11 +767,6 @@ def main() -> None:
         "task_id": args.task_ids[0] if len(args.task_ids) == 1 else None,
         "task_ids": args.task_ids,
         "seed": args.seed,
-        "post_rollback_replanning": {
-            "action_noise_std": args.post_rollback_action_noise_std,
-            "action_noise_final_scale": args.post_rollback_action_noise_final_scale,
-            "action_noise_replans": args.post_rollback_action_noise_replans,
-        },
         "summary": summarize(all_reports),
         "tasks": task_results,
         "episodes": all_reports,

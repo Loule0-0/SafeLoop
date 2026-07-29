@@ -15,7 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from safety_guard.compat import torch_load_compat
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
-POLICY_BACKENDS = ("pi0", "openvla-oft")
+POLICY_BACKENDS = ("pi0",)
 
 
 def configure_egl_vendor() -> None:
@@ -101,7 +101,7 @@ def make_policy(args: argparse.Namespace):
         return websocket_client_policy.WebsocketClientPolicy(args.policy_host, args.policy_port)
 
     if getattr(args, "policy_backend", "pi0") != "pi0":
-        raise ValueError("OpenVLA-OFT runs through --policy-mode websocket; in-process mode is pi0-only")
+        raise ValueError("in-process policy mode supports only Pi-0")
 
     if args.checkpoint_dir is None:
         raise ValueError("--checkpoint-dir or PI0_CHECKPOINT_DIR is required for in-process policy mode")
@@ -143,11 +143,7 @@ def policy_observation(
     if policy_backend not in POLICY_BACKENDS:
         raise ValueError(f"Unsupported policy backend: {policy_backend}")
 
-    if policy_backend == "openvla-oft":
-        img = np.ascontiguousarray(obs["agentview_image"][::-1, ::-1])
-        wrist_img = np.ascontiguousarray(obs["robot0_eye_in_hand_image"][::-1, ::-1])
-    else:
-        img, wrist_img = preprocess_policy_images(obs, resize_size)
+    img, wrist_img = preprocess_policy_images(obs, resize_size)
 
     observation = {
         "observation/image": img,
@@ -161,11 +157,6 @@ def policy_observation(
         ),
         "prompt": str(task_description),
     }
-    if policy_backend == "openvla-oft":
-        if benchmark is None:
-            raise ValueError("benchmark is required for OpenVLA-OFT normalization-stat selection")
-        observation["policy/backend"] = policy_backend
-        observation["policy/benchmark"] = benchmark
     return observation
 
 

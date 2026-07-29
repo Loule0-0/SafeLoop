@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import importlib.util
 import json
@@ -15,10 +16,22 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PYTHON = (3, 10)
+ARTIFACT_MANIFEST = PROJECT_ROOT / "configs" / "release" / "artifacts_pi0_v1.json"
 PINNED_SUBMODULES = {
     "third_party/LIBERO": "8f1084e3132a39270c3a13ebe37270a43ece2a01",
     "third_party/openpi": "b14bcf2989a46de9cc379f837b5a96a46a3948f4",
-    "third_party/openvla-oft": "e4287e94541f459edc4feabc4e181f537cd569a8",
+}
+PINNED_DISTRIBUTIONS = {
+    "accelerate": "1.8.1",
+    "huggingface-hub": "0.33.4",
+    "imageio": "2.37.0",
+    "imageio-ffmpeg": "0.6.0",
+    "numpy": "1.26.4",
+    "peft": "0.15.2",
+    "pillow": "11.2.1",
+    "qwen-vl-utils": "0.0.14",
+    "torch": "2.7.1",
+    "transformers": "4.53.2",
 }
 REQUIRED_MODULES = {
     "accelerate": "accelerate",
@@ -68,6 +81,13 @@ def _check_install() -> tuple[list[str], list[str], dict[str, str]]:
             versions[distribution] = importlib.metadata.version(distribution)
         except importlib.metadata.PackageNotFoundError:
             versions[distribution] = "editable/source"
+        expected_version = PINNED_DISTRIBUTIONS.get(distribution)
+        actual_version = versions[distribution].split("+", 1)[0]
+        if expected_version is not None and actual_version != expected_version:
+            errors.append(
+                f"package version mismatch for {distribution}: "
+                f"expected {expected_version}, found {versions[distribution]}"
+            )
 
     for relative_path, expected_head in PINNED_SUBMODULES.items():
         path = PROJECT_ROOT / relative_path
@@ -89,12 +109,21 @@ def _check_install() -> tuple[list[str], list[str], dict[str, str]]:
     return errors, warnings, versions
 
 
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _check_eval_assets() -> list[str]:
     errors: list[str] = []
     paths = {
         "LIBERO_ROOT": _asset_path("LIBERO_ROOT", PROJECT_ROOT / "third_party" / "LIBERO"),
         "OPENPI_ROOT": _asset_path("OPENPI_ROOT", PROJECT_ROOT / "third_party" / "openpi"),
         "QWEN_MODEL": _asset_path("QWEN_MODEL"),
+        "PI0_CHECKPOINT_DIR": _asset_path("PI0_CHECKPOINT_DIR"),
         "SAFELOOP_WEIGHTS": _asset_path("SAFELOOP_WEIGHTS"),
     }
     for name, path in paths.items():
@@ -105,12 +134,17 @@ def _check_eval_assets() -> list[str]:
 
     weights_dir = paths["SAFELOOP_WEIGHTS"]
     if weights_dir is not None and weights_dir.exists():
-        config = json.loads(
-            (PROJECT_ROOT / "configs" / "release" / "v56_24task_eval.json").read_text(encoding="utf-8")
-        )
-        for relative_path in config["checkpoints"].values():
-            if not (weights_dir / relative_path).is_file():
-                errors.append(f"missing release checkpoint: {weights_dir / relative_path}")
+        manifest = json.loads(ARTIFACT_MANIFEST.read_text(encoding="utf-8"))
+        for entry in manifest["weights"]["files"]:
+            checkpoint = weights_dir / entry["path"]
+            if not checkpoint.is_file():
+                errors.append(f"missing release checkpoint: {checkpoint}")
+                continue
+            if checkpoint.stat().st_size != int(entry["size"]):
+                errors.append(f"release checkpoint size mismatch: {checkpoint}")
+                continue
+            if _sha256(checkpoint) != entry["sha256"]:
+                errors.append(f"release checkpoint SHA256 mismatch: {checkpoint}")
     return errors
 
 
@@ -126,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scope", choices=["install", "eval"], default="install")
     parser.add_argument("--check-policy-server", action="store_true")
-    parser.add_argument("--policy-backend", choices=["pi0", "openvla-oft"], default="pi0")
+    parser.add_argument("--policy-backend", choices=["pi0"], default="pi0")
     parser.add_argument("--policy-host", default="127.0.0.1")
     parser.add_argument("--policy-port", type=int, default=8000)
     args = parser.parse_args(argv)

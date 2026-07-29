@@ -1,33 +1,34 @@
 # SafeLoop Model Card
 
-Paper: SafeLoop: Risk-Aware Rollback for Vision-Language-Action Manipulation
+## Architecture
 
-## Overview
+SafeLoop is an outer-loop controller for frozen manipulation policies:
 
-SafeLoop is an outer-loop safety controller for robotic manipulation research. It wraps a frozen base policy with a short-horizon hazard predictor, safe-anchor memory, motion-planning rollback, and a three-action decision head.
-
-## Components
-
-- Base policy: supplied by the user and kept frozen.
-- Predictor: Qwen2.5-VL backbone with a lightweight multitask head.
+- Base policy: Pi0 LIBERO checkpoint.
+- Predictor backbone: Qwen2.5-VL-3B-Instruct, frozen during released head
+  training.
+- Predictor head: future body/object risk, normalized time-to-hazard, and
+  current body/object risk.
 - Decision head: policy over `noop`, `record`, and `rollback`.
-- Rollback: motion-planning path execution to a selected safe anchor.
+- Recovery: motion-planned execution to a selected safe anchor.
 
-## Intended Use
-
-- Simulation studies of safety wrappers for manipulation policies.
-- LIBERO-style hazard prediction and rollback experiments.
-- Offline and online training of safety prediction and decision modules.
-
-## Public Artifacts
-
-SafeLoop checkpoints and release training data are hosted outside Git:
+## Artifacts
 
 - Weights: https://huggingface.co/Jaqen0-0/SafeLoop
 - Training data: https://huggingface.co/datasets/Jaqen0-0/SafeLoop-Training-Data
+- Weight revision: `pi0-v1`
+- Weight checksums:
+  `configs/release/artifacts_pi0_v1.json` in the GitHub repository.
 
-The repository does not include base policy weights, Qwen weights, raw rollout traces, or raw training logs. Users must obtain compatible third-party assets separately and follow their licenses.
+The base Pi0 and Qwen checkpoints are downloaded from their upstream
+repositories and retain their upstream licenses.
 
-## Safety Notes
+## Runtime
 
-SafeLoop is intended for research use. Real-hardware deployment requires independent safety validation, conservative emergency stops, calibrated hazard definitions, and environment-specific testing.
+The release has been validated on Linux, Python 3.10, CUDA 12.4, and an NVIDIA
+H20 GPU. The SafeLoop predictor and decision weights are loaded by
+`scripts/quickstart_pi0_safeloop.sh`.
+
+## License
+
+The SafeLoop source code is licensed under Apache-2.0.

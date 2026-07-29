@@ -38,6 +38,8 @@ def write_summary(
 
 
 class AggregateClosedLoopResultsTests(unittest.TestCase):
+    maxDiff = None
+
     def test_load_rows_reads_nested_hazard_metrics(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -82,6 +84,60 @@ class AggregateClosedLoopResultsTests(unittest.TestCase):
             comparison = report["comparisons"]["candidate"]
             self.assertEqual(comparison["deltas"]["hazard_steps_any_delta"], -20)
             self.assertEqual(comparison["pairs"][0]["task"], 5)
+
+    def test_load_rows_expands_multi_task_runner_summary(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "libero_10_tasks_0_3_seed7_rl"
+            out.mkdir()
+            payload = {
+                "benchmark": "libero_10",
+                "task_id": None,
+                "task_ids": [0, 3],
+                "seed": 7,
+                "summary": {"success_rate": 0.5},
+                "tasks": [
+                    {
+                        "task_id": 0,
+                        "summary": {
+                            "success_rate": 1.0,
+                            "hazard_events": {"any": 1},
+                            "hazard_steps": {"any": 2},
+                        },
+                    },
+                    {
+                        "task_id": 3,
+                        "summary": {
+                            "success_rate": 0.0,
+                            "hazard_events": {"any": 2},
+                            "hazard_steps": {"any": 4},
+                        },
+                    },
+                ],
+            }
+            (out / "summary.json").write_text(json.dumps(payload), encoding="utf-8")
+            rows = load_rows(root, "candidate")
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(
+                [(row["benchmark"], row["task"], row["seed"]) for row in rows],
+                [("libero_10", 0, 7), ("libero_10", 3, 7)],
+            )
+            self.assertEqual(summarize(rows)["hazard_events_any_sum"], 3)
+
+    def test_manual_placeholder_hazards_are_not_aggregated(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_summary(root, "candidate_task5_seed60", 5, 60, 1.0, events=0, steps=0)
+            path = root / "candidate_task5_seed60" / "summary.json"
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["summary"]["manual_hazard_review_required"] = True
+            path.write_text(json.dumps(payload), encoding="utf-8")
+
+            rows = load_rows(root, "candidate")
+            self.assertIsNone(rows[0]["hazard_events_any"])
+            summary = summarize(rows)
+            self.assertFalse(summary["hazard_metrics_available"])
+            self.assertIsNone(summary["hazard_events_any_sum"])
 
 
 if __name__ == "__main__":

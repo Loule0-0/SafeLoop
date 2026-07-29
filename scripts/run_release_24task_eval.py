@@ -79,6 +79,49 @@ def _entry_seeds(config: dict[str, Any], profile: dict[str, Any], entry: dict[st
     return [int(seed) for seed in values]
 
 
+def _parse_task(value: str) -> tuple[str, int]:
+    benchmark, separator, task_id = value.partition(":")
+    if not separator or not benchmark or not task_id:
+        raise argparse.ArgumentTypeError("tasks must use BENCHMARK:TASK_ID")
+    try:
+        parsed_task_id = int(task_id)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid task id in {value!r}") from exc
+    if parsed_task_id < 0:
+        raise argparse.ArgumentTypeError("task id must be non-negative")
+    return benchmark, parsed_task_id
+
+
+def _select_entries(
+    entries: list[dict[str, Any]],
+    selected_tasks: list[tuple[str, int]] | None,
+) -> list[dict[str, Any]]:
+    if not selected_tasks:
+        return entries
+    requested: dict[str, set[int]] = {}
+    for benchmark, task_id in selected_tasks:
+        requested.setdefault(benchmark, set()).add(task_id)
+
+    selected: list[dict[str, Any]] = []
+    found: set[tuple[str, int]] = set()
+    for entry in entries:
+        benchmark = entry["benchmark"]
+        task_ids = [
+            int(task_id)
+            for task_id in entry["task_ids"]
+            if int(task_id) in requested.get(benchmark, set())
+        ]
+        if task_ids:
+            selected.append({**entry, "task_ids": task_ids})
+            found.update((benchmark, task_id) for task_id in task_ids)
+
+    missing = sorted(set(selected_tasks) - found)
+    if missing:
+        values = ", ".join(f"{benchmark}:{task_id}" for benchmark, task_id in missing)
+        raise ValueError(f"selected task(s) are not present in the profile: {values}")
+    return selected
+
+
 def _build_command(
     config: dict[str, Any],
     entry: dict[str, Any],
@@ -88,6 +131,7 @@ def _build_command(
 ) -> list[str]:
     args: dict[str, Any] = {}
     args.update(config["common_args"])
+    args.update(config.get("suite_args", {}).get(entry["benchmark"], {}))
     args.update(config.get("gates", {}).get(entry.get("gate", "standard"), {}))
     args.update({
         "benchmark": entry["benchmark"],
@@ -130,6 +174,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--policy-host", default="127.0.0.1")
     parser.add_argument("--policy-port", type=int, default=8000)
     parser.add_argument("--seeds", nargs="+", type=int)
+    parser.add_argument(
+        "--task",
+        action="append",
+        type=_parse_task,
+        help="Run only BENCHMARK:TASK_ID; repeat to select multiple tasks",
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
 
@@ -154,7 +204,11 @@ def main(argv: list[str] | None = None) -> int:
         env["PI0_CHECKPOINT_DIR"] = str(args.checkpoint_dir)
 
     profile = profiles[args.profile]
-    for entry in profile["entries"]:
+    try:
+        entries = _select_entries(profile["entries"], args.task)
+    except ValueError as exc:
+        parser.error(str(exc))
+    for entry in entries:
         seeds = args.seeds if args.seeds is not None else _entry_seeds(config, profile, entry)
         for seed in seeds:
             command = _build_command(config, entry, seed, context, args.output_root)

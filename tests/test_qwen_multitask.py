@@ -17,7 +17,7 @@ class QwenMultitaskDataTests(unittest.TestCase):
         self.assertEqual(converted.count("<|image_pad|>"), 2)
         self.assertIn("<|vision_start|><|image_pad|><|vision_end|>", converted)
 
-    def test_parse_future_labels_uses_paper_tth_target_for_negatives(self):
+    def test_parse_future_labels_uses_fixed_tth_target_for_negatives(self):
         from safety_guard.qwen_multitask import parse_future_labels
 
         sample = {

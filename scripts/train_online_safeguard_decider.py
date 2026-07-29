@@ -84,7 +84,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--libero-root", type=Path, default=env_path("LIBERO_ROOT"))
     parser.add_argument("--checkpoint-dir", type=Path, default=env_path("PI0_CHECKPOINT_DIR"))
     parser.add_argument("--config-name", default="pi0_libero")
-    parser.add_argument("--policy-backend", choices=["pi0", "openvla-oft"], default="pi0")
+    parser.add_argument("--policy-backend", choices=["pi0"], default="pi0")
     parser.add_argument("--policy-mode", choices=["inprocess", "websocket"], default="inprocess")
     parser.add_argument("--policy-host", default="127.0.0.1")
     parser.add_argument("--policy-port", type=int, default=8000)
@@ -679,9 +679,6 @@ def rollout_episode(env, task, init_states, base_policy, predictor, decision_pol
                 policy_backend=args.policy_backend,
                 benchmark=args.benchmark,
             )
-            if args.policy_backend == "openvla-oft":
-                policy_input["policy/episode_seed"] = int(args.seed + episode_id)
-                policy_input["policy/reset"] = step_index == 0
             action_chunk = base_policy.infer(policy_input)["actions"]
             if len(action_chunk) < args.replan_steps:
                 raise RuntimeError(f"policy returned {len(action_chunk)} actions, need {args.replan_steps}")

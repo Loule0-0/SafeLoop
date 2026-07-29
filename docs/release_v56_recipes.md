@@ -1,68 +1,81 @@
-# SafeLoop v56 Release Recipes
+# SafeLoop Pi0 Release Recipes
 
-This page records the public training and evaluation entry points for the release associated with:
+This page records the training and evaluation entry points for the `pi0-v1`
+artifact set.
 
-**SafeLoop: Risk-Aware Rollback for Vision-Language-Action Manipulation**
+## Version Matrix
 
-The repository keeps code and compact configs in Git. Large weights and training data are hosted separately:
+| Component | Version |
+|---|---|
+| SafeLoop package | `1.0.0` |
+| SafeLoop weights | `Jaqen0-0/SafeLoop@pi0-v1` |
+| Qwen backbone | `Qwen/Qwen2.5-VL-3B-Instruct@66285546d2b821cf421d4f5eb2576359d3770cd3` |
+| Pi0 checkpoint | `gs://openpi-assets/checkpoints/pi0_libero` |
+| LIBERO submodule | `8f1084e3132a39270c3a13ebe37270a43ece2a01` |
+| OpenPI submodule | `b14bcf2989a46de9cc379f837b5a96a46a3948f4` |
 
-- Weights: https://huggingface.co/Jaqen0-0/SafeLoop
-- Training data: https://huggingface.co/datasets/Jaqen0-0/SafeLoop-Training-Data
+The complete file sizes and SHA256 values for all released SafeLoop checkpoints
+are stored in
+[`configs/release/artifacts_pi0_v1.json`](../configs/release/artifacts_pi0_v1.json).
 
 ## Download Artifacts
 
 ```bash
-hf download Jaqen0-0/SafeLoop --local-dir $SAFELOOP_WEIGHTS
-hf download Jaqen0-0/SafeLoop-Training-Data --repo-type dataset --local-dir $SAFELOOP_DATA
-python scripts/materialize_hf_training_data.py \
-  --dataset-dir $SAFELOOP_DATA \
-  --out $SAFELOOP_DATA/materialized
-```
+python scripts/download_release_weights.py \
+  --output-dir "$SAFELOOP_WEIGHTS"
 
-The dataset includes three JSONL files and a de-duplicated image-frame shard set. The materialized image root should be passed as `--data-root`.
+hf download Jaqen0-0/SafeLoop-Training-Data \
+  --repo-type dataset \
+  --local-dir "$SAFELOOP_DATA"
+
+python scripts/materialize_hf_training_data.py \
+  --dataset-dir "$SAFELOOP_DATA" \
+  --out "$SAFELOOP_DATA/materialized"
+```
 
 ## Predictor Heads
 
-The release uses a staged predictor-head family:
+The predictor recipe contains three stages:
 
-- `v9_object_recall`: object-recall head for object-heavy rollout states.
-- `v23_success_balanced`: balanced head that preserves task success while improving current hazard separation.
-- `v30_lowdrift_success`: low-drift stuck/object head that supplies the final step-300 and step-600 checkpoints.
-
-Run the exact recipes:
+- `v9_object_recall`
+- `v23_success_balanced`
+- `v30_lowdrift_success`
 
 ```bash
 python scripts/run_release_predictor_training.py \
-  --dataset-dir $SAFELOOP_DATA \
-  --data-root $SAFELOOP_DATA/materialized \
-  --model-dir $QWEN_MODEL \
-  --weights-dir $SAFELOOP_WEIGHTS \
-  --output-root $SAFELOOP_OUTPUT
+  --dataset-dir "$SAFELOOP_DATA" \
+  --data-root "$SAFELOOP_DATA/materialized" \
+  --model-dir "$QWEN_MODEL" \
+  --weights-dir "$SAFELOOP_WEIGHTS" \
+  --output-root "$SAFELOOP_OUTPUT"
 ```
 
-To run only one stage, add `--recipe v30_lowdrift_success`.
+Select one stage with `--recipe`, for example
+`--recipe v30_lowdrift_success`.
 
 ## Decision Head
 
-The online decision head learns the three actions `noop`, `record`, and `rollback`. The release reward configuration is in `configs/release/v56_decider_training.json`.
+The decision head selects `noop`, `record`, or `rollback`.
 
 ```bash
 python scripts/run_release_decider_training.py \
-  --model-dir $QWEN_MODEL \
-  --weights-dir $SAFELOOP_WEIGHTS \
-  --output-root $SAFELOOP_OUTPUT \
-  --libero-root $LIBERO_ROOT \
-  --openpi-root $OPENPI_ROOT \
-  --checkpoint-dir $PI0_CHECKPOINT_DIR \
+  --model-dir "$QWEN_MODEL" \
+  --weights-dir "$SAFELOOP_WEIGHTS" \
+  --output-root "$SAFELOOP_OUTPUT" \
+  --libero-root "$LIBERO_ROOT" \
+  --openpi-root "$OPENPI_ROOT" \
+  --checkpoint-dir "$PI0_CHECKPOINT_DIR" \
   --policy-host 127.0.0.1 \
   --policy-port 8000
 ```
 
-The core reward terms are completion `+10.0`, body/stuck penalties `-2.0/-3.0`, rollback failure `-9.0`, resolved rollback `+10.0`, unresolved rollback `-8.0`, episode success after rollback `+4.0`, and episode failure after rollback `-5.5`.
+The recipe uses completion reward `+10.0`, body/stuck penalties `-2.0/-3.0`,
+rollback failure `-9.0`, resolved rollback `+10.0`, unresolved rollback `-8.0`,
+post-rollback episode success `+4.0`, and post-rollback episode failure `-5.5`.
 
-## 24-Task Evaluation
+## Evaluation
 
-The 24-task suite is defined in `configs/release/v56_24task_eval.json`:
+The configured task set is:
 
 - LIBERO_OBJECT: `3, 9`
 - LIBERO_GOAL: `0, 3, 5, 6, 9`
@@ -70,22 +83,20 @@ The 24-task suite is defined in `configs/release/v56_24task_eval.json`:
 - LIBERO_SPATIAL: `0, 2, 4, 6`
 - LIBERO_90: `0, 28, 30, 32, 37, 71, 84`
 
-Run the default SafeLoop release matrix. This expands to 24 tasks x 16 seeds, for 384 rollouts. Seed `k` selects LIBERO initial-state index `k`, matching the paper's paired random-seed and initial-state protocol.
+The suite horizons are Spatial `220`, Object `280`, Goal `300`, LIBERO-10
+`520`, and LIBERO-90 `400` control steps.
 
 ```bash
 python scripts/run_release_24task_eval.py \
-  --model-dir $QWEN_MODEL \
-  --weights-dir $SAFELOOP_WEIGHTS \
-  --output-root $SAFELOOP_OUTPUT/eval_24task \
-  --libero-root $LIBERO_ROOT \
-  --openpi-root $OPENPI_ROOT \
-  --checkpoint-dir $PI0_CHECKPOINT_DIR \
+  --model-dir "$QWEN_MODEL" \
+  --weights-dir "$SAFELOOP_WEIGHTS" \
+  --output-root "$SAFELOOP_OUTPUT/eval_24task" \
+  --libero-root "$LIBERO_ROOT" \
+  --openpi-root "$OPENPI_ROOT" \
+  --checkpoint-dir "$PI0_CHECKPOINT_DIR" \
   --policy-host 127.0.0.1 \
   --policy-port 8000
 ```
 
-For a 24-rollout integration smoke test, append `--seeds 0`. This only overrides the current run; the checked-in release matrix remains 384 rollouts.
-
-The default profile is `safeloop_all`. The base-policy comparison uses `--profile base_policy_reference`.
-
-Paper hazard metrics are intended to be filled from manual video or trajectory review. The release profile enables `--manual-hazard-labels`, so automatic hazard counters in the JSON summaries are placeholders and should not be reported as paper safety numbers.
+Select a subset with `--task BENCHMARK:TASK_ID` and `--seeds`. The baseline
+profile is `base_policy_reference`.

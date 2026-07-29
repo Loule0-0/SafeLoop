@@ -1,0 +1,61 @@
+{
+  "release": "pi0-v1",
+  "weights": {
+    "repo_id": "Jaqen0-0/SafeLoop",
+    "revision": "pi0-v1",
+    "files": [
+      {
+        "path": "decision_heads/g6_safeanchor_update004.pt",
+        "size": 322555,
+        "sha256": "174d7f860d9be7722251ec96773375b6c2b9ce1dbc508e1f5a35697e9102067a"
+      },
+      {
+        "path": "decision_heads/init_g4_success_bodygate_update000.pt",
+        "size": 322555,
+        "sha256": "06ee86c91dab7eaec1ff8d39300a0f7551862243a5103f3e23039295ea29b09e"
+      },
+      {
+        "path": "prediction_heads/init_v13_ultra_lowdrift_success_step0100_multitask_head.pt",
+        "size": 4231285,
+        "sha256": "445a5f13c9378965fa5ee81c7209e23f65c516af112d0567354971a1057578cf"
+      },
+      {
+        "path": "prediction_heads/init_v8_balanced_step1500_multitask_head.pt",
+        "size": 4230746,
+        "sha256": "6ade29e547c488c206ca6a1a58453b911f68969ecc14b4a0f665d83d52f66ca5"
+      },
+      {
+        "path": "prediction_heads/v23_success_balanced_step1000_multitask_head.pt",
+        "size": 4231285,
+        "sha256": "b9526f519614a141f40bdc8b7326ce559580c43a93fa78e5655bc85d118dcc3a"
+      },
+      {
+        "path": "prediction_heads/v30_lowdrift_success_step300_multitask_head.pt",
+        "size": 4231285,
+        "sha256": "a6c8d6cd353e0b4fbf0517d90dc4d6c353abcad910a61053602b6b6986d9be78"
+      },
+      {
+        "path": "prediction_heads/v30_lowdrift_success_step600_multitask_head.pt",
+        "size": 4231285,
+        "sha256": "ca65f993e6f54860bbd43bb5e171ca5984bd2e63b6fe151c6ba39ab05e2e02f4"
+      },
+      {
+        "path": "prediction_heads/v9_object_recall_step3500_multitask_head.pt",
+        "size": 4230746,
+        "sha256": "16214392caad7edb323044c9132ec95a89573b1332e5a8b15c60e2c88add0c64"
+      }
+    ]
+  },
+  "predictor_backbone": {
+    "repo_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+    "revision": "66285546d2b821cf421d4f5eb2576359d3770cd3"
+  },
+  "base_policy": {
+    "config": "pi0_libero",
+    "checkpoint": "gs://openpi-assets/checkpoints/pi0_libero"
+  },
+  "submodules": {
+    "third_party/LIBERO": "8f1084e3132a39270c3a13ebe37270a43ece2a01",
+    "third_party/openpi": "b14bcf2989a46de9cc379f837b5a96a46a3948f4"
+  }
+}
